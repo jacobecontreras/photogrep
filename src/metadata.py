@@ -222,13 +222,15 @@ def _query_photos_sqlite(conn: sqlite3.Connection) -> list:
         return []
 
 
-def extract_photo_metadata(parser, manifest: dict, output_dir) -> dict:
+def extract_photo_metadata(parser, manifest: dict, output_dir,
+                           progress_callback=None) -> dict:
     """Extract photo metadata from Photos.sqlite and EXIF.
 
     Args:
         parser: iOSBackupParser instance.
         manifest: dict mapping file_id -> {relative_path, domain, ...}.
         output_dir: Path to the extraction output directory.
+        progress_callback: Optional callable(current, total) for progress updates.
 
     Returns:
         dict mapping file_id -> metadata dict.
@@ -312,32 +314,46 @@ def extract_photo_metadata(parser, manifest: dict, output_dir) -> dict:
         logger.warning(f"Could not open Photos.sqlite: {e}")
 
     # Step 2: Walk manifest and match
-    for file_id, info in manifest.items():
+    # Pre-build a lookup from rel_path suffix to db_meta for O(1) matching
+    _IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.heic', '.heif', '.tiff', '.tif', '.dng'}
+    path_to_db_meta = {}
+    for db_key, meta in db_meta.items():
+        path_to_db_meta[db_key] = meta
+
+    # Pre-filter to image files for accurate progress count
+    image_items = [
+        (fid, info) for fid, info in manifest.items()
+        if Path(info.get("relative_path", "")).suffix.lower() in _IMAGE_EXTENSIONS
+    ]
+    total = len(image_items)
+
+    for idx, (file_id, info) in enumerate(image_items, 1):
+        if progress_callback:
+            progress_callback(idx, total)
         rel_path = info.get("relative_path", "")
-        domain = info.get("domain", "")
 
         # Try to match Camera Roll images via ZDIRECTORY/ZFILENAME suffix
         matched = False
-        if db_meta and rel_path:
-            for db_key, meta in db_meta.items():
-                if rel_path.endswith(db_key):
-                    result[file_id] = meta
-                    matched = True
-                    break
+        if path_to_db_meta and rel_path:
+            # Extract the directory/filename portion to match against db keys
+            parts = rel_path.split("/")
+            # db_key format is "DCIM/subdir/filename" — try last 2 and 3 segments
+            for n in (2, 3):
+                if len(parts) >= n:
+                    suffix_key = "/".join(parts[-n:])
+                    if suffix_key in path_to_db_meta:
+                        result[file_id] = path_to_db_meta[suffix_key]
+                        matched = True
+                        break
 
         # For non-Camera Roll or unmatched images, try EXIF from extracted file
         if not matched:
             try:
-                # Find the extracted file on disk by file_id
                 candidates = list(output_dir.glob(f"{file_id}.*"))
-                # Also check _deep subdirectory
                 candidates.extend(output_dir.glob(f"_deep/{file_id}.*"))
                 for candidate in candidates:
-                    if candidate.is_file() and candidate.suffix.lower() in {
-                        '.jpg', '.jpeg', '.png', '.heic', '.heif', '.tiff', '.tif', '.dng',
-                    }:
+                    if candidate.is_file() and candidate.suffix.lower() in _IMAGE_EXTENSIONS:
                         meta = _extract_exif(str(candidate))
-                        # Only include if we got at least some data
                         if meta.get("date_created") or meta.get("latitude") or meta.get("camera_model"):
                             result[file_id] = meta
                         break
