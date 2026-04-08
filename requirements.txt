@@ -1,0 +1,9 @@
+cryptography
+open-clip-torch
+torch
+faiss-cpu
+Pillow
+numpy
+tqdm
+customtkinter
+pillow-heif
