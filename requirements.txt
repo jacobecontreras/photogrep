@@ -1,4 +1,5 @@
 cryptography
+nska_deserialize
 open-clip-torch
 torch
 faiss-cpu
