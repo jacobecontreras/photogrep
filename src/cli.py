@@ -1,30 +1,16 @@
 #!/usr/bin/env python3
 import argparse
 import getpass
-import json
 import time
 from pathlib import Path
 
 from .ios_backup import (
-    iOSBackupParser,
-    iOSBackupDecryptor,
-    is_image_file,
     check_encryption_status,
     get_backup_device_name,
+    run_extraction,
 )
 
 DEFAULT_OUTPUT = "output_images"
-
-
-def decrypt_backup(backup_path: Path, password: str) -> tuple:
-    decryptor = iOSBackupDecryptor(str(backup_path))
-    result = decryptor.decrypt_with_password(password)
-
-    if not result.success:
-        print(f"Decryption failed: {result.message}")
-        return None, None
-
-    return result.manifest_key, result.protection_classes
 
 
 def cmd_extract(args):
@@ -37,102 +23,45 @@ def cmd_extract(args):
         print("Make sure this is a valid iOS backup directory.")
         return
 
-    # Create per-device output directory
     device_name = get_backup_device_name(backup_path)
     output_path = base_output / device_name
     output_path.mkdir(parents=True, exist_ok=True)
 
-    is_encrypted = check_encryption_status(backup_path)
-
-    if is_encrypted:
+    password = None
+    if check_encryption_status(backup_path):
         password = args.password
         if not password:
             password = getpass.getpass("Enter backup password: ")
 
-        unwrapped_manifest_key, protection_classes = decrypt_backup(backup_path, password)
-        if unwrapped_manifest_key is None:
-            return
-
-        parser = iOSBackupParser(
-            str(backup_path),
-            unwrapped_manifest_key=unwrapped_manifest_key,
-            protection_classes=protection_classes
-        )
-
-        all_files = parser.get_all_files(filter_images=False)
-        image_files = [f for f in all_files if is_image_file(f, parser)]
-
-    else:
-        parser = iOSBackupParser(
-            str(backup_path),
-        )
-
-        image_files = parser.get_all_files(filter_images=True)
-
-    if not image_files:
-        print("No images found in backup.")
-        parser.cleanup()
-        return
-
-    print(f"Found {len(image_files)} image(s).")
-    print(f"Extracting to: {output_path}")
-
-    def progress_callback(current: int, total: int, filename: str):
+    def extract_progress(current: int, total: int, filename: str):
         percent = int((current / total) * 100) if total > 0 else 0
         print(f"\r  Extracting: {current}/{total} ({percent}%) - {filename[:50]}", end='', flush=True)
-
-    parser.extract_files(
-        str(output_path),
-        backup_files=image_files,
-        progress_callback=progress_callback
-    )
-    print()
-
-    # Save file manifest for semantic search metadata
-    manifest = {}
-    for f in image_files:
-        manifest[f.file_id] = {
-            "relative_path": f.relative_path,
-            "domain": f.domain,
-        }
-
-    print(f"\nExtraction complete!")
-    print(f"  Extracted: {len(image_files)} image(s)")
-    print(f"  Output: {output_path}")
-
-    # Deep extraction — images from app databases and BLOBs
-    print(f"\nRunning deep extraction (databases, BLOBs, app caches)...")
-    deep_manifest = parser.extract_deep_images(str(output_path))
-    if deep_manifest:
-        manifest.update(deep_manifest)
-        print(f"  Deep extraction: {len(deep_manifest)} additional image(s)")
-    else:
-        print(f"  Deep extraction: no additional images found")
-
-    manifest_path = output_path / "file_manifest.json"
-    with open(manifest_path, "w") as mf:
-        json.dump(manifest, mf)
-
-    parser.cleanup()
-
-    # Build CLIP search index
-    from .semantic import SemanticIndex
-
-    index_dir = str(output_path / ".search_index")
-    index = SemanticIndex(index_dir)
-
-    print(f"\nBuilding search index...")
 
     def index_progress(current: int, total: int):
         percent = int((current / total) * 100) if total > 0 else 0
         print(f"\r  Indexing: {current}/{total} ({percent}%)", end='', flush=True)
 
-    index.build_index(
-        str(output_path),
-        file_manifest=manifest,
-        progress_callback=index_progress,
-    )
-    print(f"\nIndexing complete!")
+    def status_update(msg: str):
+        print(f"\n{msg}")
+
+    try:
+        manifest = run_extraction(
+            backup_path,
+            output_path,
+            password=password,
+            extract_progress=extract_progress,
+            index_progress=index_progress,
+            status_update=status_update,
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
+        return
+
+    if manifest is None:
+        print("No images found in backup.")
+        return
+
+    print(f"\nComplete! Output: {output_path}")
 
 
 def cmd_index(args):

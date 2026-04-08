@@ -56,7 +56,7 @@ def forensic_image_open(path: str) -> Image.Image:
 
     raise OSError(f"cannot open image file '{path}'")
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".dng", ".thm"}
+from .ios_backup import IMAGE_EXTENSIONS
 
 INDEX_FILENAME = "image_index.faiss"
 METADATA_FILENAME = "metadata.json"

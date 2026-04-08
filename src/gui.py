@@ -18,11 +18,11 @@ import customtkinter as ctk
 from PIL import Image, ImageTk
 
 from .ios_backup import (
-    iOSBackupParser,
+    IMAGE_EXTENSIONS,
     iOSBackupDecryptor,
-    is_image_file,
     check_encryption_status,
     get_backup_device_name,
+    run_extraction,
 )
 from .semantic import forensic_image_open
 
@@ -63,7 +63,6 @@ SEARCH_PRESETS = {
 
 THUMB_SIZE = 150
 CELL_SIZE = THUMB_SIZE + 8  # thumb + padding
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".dng", ".thm"}
 
 
 def _dir_has_images(path: Path) -> bool:
@@ -495,88 +494,33 @@ class SelectorView(ctk.CTkFrame):
                 device_name = get_backup_device_name(backup_path)
                 output_path = self.base_output / device_name
                 output_path.mkdir(parents=True, exist_ok=True)
+                index_dir = str(output_path / ".search_index")
 
-                if self._is_encrypted:
-                    decryptor = iOSBackupDecryptor(str(backup_path))
-                    result = decryptor.decrypt_with_password(password)
-                    if not result.success:
-                        msg = result.message
-                        self.after(0, lambda: self._extraction_error(msg))
-                        return
-
-                    parser = iOSBackupParser(
-                        str(backup_path),
-                        unwrapped_manifest_key=result.manifest_key,
-                        protection_classes=result.protection_classes,
-                    )
-                    all_files = parser.get_all_files(filter_images=False)
-                    image_files = [f for f in all_files if is_image_file(f, parser)]
-                else:
-                    parser = iOSBackupParser(str(backup_path))
-                    image_files = parser.get_all_files(filter_images=True)
-
-                total = len(image_files)
-                if total == 0:
-                    self.after(0, lambda: self._extraction_error("No images found in backup."))
-                    parser.cleanup()
-                    return
-
-                self.after(0, lambda: self.status_label.configure(
-                    text=f"Extracting {total} images..."
-                ))
-
-                def progress(current, t, filename):
-                    self.after(0, lambda c=current: self.status_label.configure(
-                        text=f"Extracting {c}/{total}..."
+                def extract_progress(current, total, filename):
+                    self.after(0, lambda c=current, t=total: self.status_label.configure(
+                        text=f"Extracting {c}/{t}..."
                     ))
 
-                parser.extract_files(
-                    str(output_path),
-                    backup_files=image_files,
-                    progress_callback=progress,
-                )
-
-                # Save manifest
-                manifest = {}
-                for f in image_files:
-                    manifest[f.file_id] = {
-                        "relative_path": f.relative_path,
-                        "domain": f.domain,
-                    }
-
-                # Deep extraction — app databases, BLOBs
-                self.after(0, lambda: self.status_label.configure(
-                    text="Deep extraction (databases, BLOBs)..."
-                ))
-                deep_manifest = parser.extract_deep_images(str(output_path))
-                if deep_manifest:
-                    manifest.update(deep_manifest)
-
-                manifest_path = output_path / "file_manifest.json"
-                with open(manifest_path, "w") as mf:
-                    json.dump(manifest, mf)
-
-                parser.cleanup()
-
-                # Build CLIP search index
-                index_dir = str(output_path / ".search_index")
-                self.after(0, lambda: self.status_label.configure(
-                    text="Building search index..."
-                ))
-
-                from .semantic import SemanticIndex
-                index = SemanticIndex(index_dir)
-
-                def index_progress(current, idx_total):
-                    self.after(0, lambda c=current, t=idx_total: self.status_label.configure(
+                def idx_progress(current, total):
+                    self.after(0, lambda c=current, t=total: self.status_label.configure(
                         text=f"Indexing {c}/{t}..."
                     ))
 
-                index.build_index(
-                    str(output_path),
-                    file_manifest=manifest,
-                    progress_callback=index_progress,
+                def status_update(msg):
+                    self.after(0, lambda: self.status_label.configure(text=msg))
+
+                manifest = run_extraction(
+                    backup_path,
+                    output_path,
+                    password=password,
+                    extract_progress=extract_progress,
+                    index_progress=idx_progress,
+                    status_update=status_update,
                 )
+
+                if manifest is None:
+                    self.after(0, lambda: self._extraction_error("No images found in backup."))
+                    return
 
                 self.after(0, lambda: self.app.show_gallery(str(output_path), index_dir))
 

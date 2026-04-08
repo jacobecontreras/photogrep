@@ -4,13 +4,14 @@ iOS Backup Module
 Handles iOS backup decryption and image extraction.
 """
 
+import json
 import plistlib
 import hashlib
 import sqlite3
 import tempfile
 import shutil
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Callable
 from dataclasses import dataclass
 import logging
 
@@ -281,6 +282,46 @@ class iOSBackupDecryptor:
         return protection_classes
 
 
+def _parse_file_metadata(file_data: bytes) -> tuple:
+    """Parse plist file_data blob from Manifest.db.
+
+    Returns (file_size, encryption_key, protection_class).
+    """
+    file_size = 0
+    encryption_key = None
+    protection_class = None
+
+    if not file_data:
+        return file_size, encryption_key, protection_class
+
+    try:
+        file_metadata = plistlib.loads(file_data)
+        if file_metadata.get('$archiver') == 'NSKeyedArchiver' and HAS_NSKA:
+            try:
+                file_metadata = nska_deserialize.deserialize_plist_from_string(file_data)
+            except Exception:
+                file_metadata = {}
+
+        file_size = file_metadata.get('Size', 0)
+
+        enc_key_container = file_metadata.get('EncryptionKey')
+        if enc_key_container:
+            if isinstance(enc_key_container, dict) and 'NS.data' in enc_key_container:
+                enc_key_data = enc_key_container['NS.data']
+            elif isinstance(enc_key_container, bytes):
+                enc_key_data = enc_key_container
+            else:
+                enc_key_data = None
+
+            if enc_key_data and isinstance(enc_key_data, bytes) and len(enc_key_data) > 4:
+                protection_class = int.from_bytes(enc_key_data[0:4], byteorder='little')
+                encryption_key = enc_key_data[4:]
+    except Exception:
+        pass
+
+    return file_size, encryption_key, protection_class
+
+
 class iOSBackupParser:
     """Parser for iOS iTunes/Finder backups (iOS 10+ with Manifest.db)."""
 
@@ -455,35 +496,7 @@ class iOSBackupParser:
             file_data = row['file']
 
             file_path = self.backup_path / file_id[:2] / file_id
-            file_size = 0
-            encryption_key = None
-            protection_class = None
-
-            if file_data:
-                try:
-                    file_metadata = plistlib.loads(file_data)
-                    if file_metadata.get('$archiver') == 'NSKeyedArchiver' and HAS_NSKA:
-                        try:
-                            file_metadata = nska_deserialize.deserialize_plist_from_string(file_data)
-                        except Exception:
-                            file_metadata = {}
-
-                    file_size = file_metadata.get('Size', 0)
-
-                    enc_key_container = file_metadata.get('EncryptionKey')
-                    if enc_key_container:
-                        if isinstance(enc_key_container, dict) and 'NS.data' in enc_key_container:
-                            enc_key_data = enc_key_container['NS.data']
-                        elif isinstance(enc_key_container, bytes):
-                            enc_key_data = enc_key_container
-                        else:
-                            enc_key_data = None
-
-                        if enc_key_data and isinstance(enc_key_data, bytes) and len(enc_key_data) > 4:
-                            protection_class = int.from_bytes(enc_key_data[0:4], byteorder='little')
-                            encryption_key = enc_key_data[4:]
-                except Exception:
-                    pass
+            file_size, encryption_key, protection_class = _parse_file_metadata(file_data)
 
             backup_file = BackupFile(
                 file_id=file_id,
@@ -596,33 +609,7 @@ class iOSBackupParser:
         file_id = row['fileID']
         file_path = self.backup_path / file_id[:2] / file_id
 
-        file_size = 0
-        encryption_key = None
-        protection_class = None
-        file_data = row['file']
-
-        if file_data:
-            try:
-                file_metadata = plistlib.loads(file_data)
-                if file_metadata.get('$archiver') == 'NSKeyedArchiver' and HAS_NSKA:
-                    try:
-                        file_metadata = nska_deserialize.deserialize_plist_from_string(file_data)
-                    except Exception:
-                        file_metadata = {}
-                file_size = file_metadata.get('Size', 0)
-                enc_key_container = file_metadata.get('EncryptionKey')
-                if enc_key_container:
-                    if isinstance(enc_key_container, dict) and 'NS.data' in enc_key_container:
-                        enc_key_data = enc_key_container['NS.data']
-                    elif isinstance(enc_key_container, bytes):
-                        enc_key_data = enc_key_container
-                    else:
-                        enc_key_data = None
-                    if enc_key_data and isinstance(enc_key_data, bytes) and len(enc_key_data) > 4:
-                        protection_class = int.from_bytes(enc_key_data[0:4], byteorder='little')
-                        encryption_key = enc_key_data[4:]
-            except Exception:
-                pass
+        file_size, encryption_key, protection_class = _parse_file_metadata(row['file'])
 
         conn.close()
 
@@ -1058,3 +1045,88 @@ class iOSBackupParser:
             self.cleanup()
         except Exception:
             pass
+
+
+def run_extraction(
+    backup_path: Path,
+    output_path: Path,
+    password: Optional[str] = None,
+    extract_progress: Optional[Callable] = None,
+    index_progress: Optional[Callable] = None,
+    status_update: Optional[Callable] = None,
+) -> Optional[dict]:
+    """Run the full extraction pipeline: decrypt, extract, deep-extract, index.
+
+    Returns the file manifest dict on success, None if no images found.
+    Raises ValueError on decryption failure.
+    """
+    def _status(msg: str):
+        if status_update:
+            status_update(msg)
+
+    is_encrypted = check_encryption_status(backup_path)
+
+    if is_encrypted:
+        if not password:
+            raise ValueError("Backup is encrypted but no password provided.")
+        decryptor = iOSBackupDecryptor(str(backup_path))
+        result = decryptor.decrypt_with_password(password)
+        if not result.success:
+            raise ValueError(result.message)
+
+        parser = iOSBackupParser(
+            str(backup_path),
+            unwrapped_manifest_key=result.manifest_key,
+            protection_classes=result.protection_classes,
+        )
+        all_files = parser.get_all_files(filter_images=False)
+        image_files = [f for f in all_files if is_image_file(f, parser)]
+    else:
+        parser = iOSBackupParser(str(backup_path))
+        image_files = parser.get_all_files(filter_images=True)
+
+    if not image_files:
+        parser.cleanup()
+        return None
+
+    _status(f"Extracting {len(image_files)} images...")
+    parser.extract_files(
+        str(output_path),
+        backup_files=image_files,
+        progress_callback=extract_progress,
+    )
+
+    # Build manifest
+    manifest = {}
+    for f in image_files:
+        manifest[f.file_id] = {
+            "relative_path": f.relative_path,
+            "domain": f.domain,
+        }
+
+    # Deep extraction
+    _status("Deep extraction (databases, BLOBs)...")
+    deep_manifest = parser.extract_deep_images(str(output_path))
+    if deep_manifest:
+        manifest.update(deep_manifest)
+
+    # Save manifest
+    manifest_path = output_path / "file_manifest.json"
+    with open(manifest_path, "w") as mf:
+        json.dump(manifest, mf)
+
+    parser.cleanup()
+
+    # Build CLIP search index
+    _status("Building search index...")
+    from .semantic import SemanticIndex
+
+    index_dir = str(output_path / ".search_index")
+    index = SemanticIndex(index_dir)
+    index.build_index(
+        str(output_path),
+        file_manifest=manifest,
+        progress_callback=index_progress,
+    )
+
+    return manifest
