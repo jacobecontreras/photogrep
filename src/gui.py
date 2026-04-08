@@ -560,6 +560,8 @@ class GalleryView(ctk.CTkFrame):
         self._active_preset: Optional[str] = None
         self._preset_buttons: dict = {}
         self._threshold_value: float = 0.20
+        self._poll_id = None
+        self._scroll_after_id = None
 
         # Thumbnail cache dir
         self.thumb_dir = self.image_dir / ".thumbnails"
@@ -581,9 +583,6 @@ class GalleryView(ctk.CTkFrame):
 
         # Load search index in background
         threading.Thread(target=self._load_search_index, daemon=True).start()
-
-        # Start thumbnail polling
-        self._poll_thumbnails()
 
         # Initial layout after window is mapped
         self.after(100, self._full_layout)
@@ -808,10 +807,13 @@ class GalleryView(ctk.CTkFrame):
                 args=(paths_to_load,),
                 daemon=True,
             ).start()
+            self._start_polling()
 
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(-event.delta, "units")
-        self.after(10, self._render_visible)
+        if self._scroll_after_id is not None:
+            self.after_cancel(self._scroll_after_id)
+        self._scroll_after_id = self.after(10, self._render_visible)
 
     def _on_canvas_configure(self, event):
         new_cols = max(2, event.width // CELL_SIZE)
@@ -871,8 +873,14 @@ class GalleryView(ctk.CTkFrame):
         with ThreadPoolExecutor(max_workers=8) as executor:
             executor.map(worker, paths)
 
+    def _start_polling(self):
+        """Start the thumbnail poll loop if not already running."""
+        if self._poll_id is None:
+            self._poll_id = self.after(50, self._poll_thumbnails)
+
     def _poll_thumbnails(self):
         """Poll queue and update canvas items for loaded thumbnails."""
+        self._poll_id = None
         count = 0
         while count < 50:
             try:
@@ -897,7 +905,8 @@ class GalleryView(ctk.CTkFrame):
             except queue.Empty:
                 break
 
-        self.after(50, self._poll_thumbnails)
+        if self._loading_paths:
+            self._poll_id = self.after(50, self._poll_thumbnails)
 
     # --- Search ---
 
