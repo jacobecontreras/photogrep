@@ -29,4 +29,3 @@ python -m src gui
 | `index`   | Build/rebuild the CLIP search index  |
 | `search`  | Search images by text query          |
 | `gui`     | Launch the photo gallery UI          |
-# photogrep
