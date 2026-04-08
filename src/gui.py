@@ -67,6 +67,11 @@ THUMB_SIZE = 150
 CELL_SIZE = THUMB_SIZE + 8  # thumb + padding
 
 
+class _ExtractionCancelled(Exception):
+    """Raised internally when the user cancels an extraction."""
+    pass
+
+
 def _count_images(path: Path) -> int:
     """Count image files in a directory."""
     return sum(1 for p in path.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
@@ -129,6 +134,8 @@ class SelectorView(ctk.CTkFrame):
         self._selected_path: Optional[Path] = None
         self._password: Optional[str] = None
         self._is_encrypted = False
+        self._cancel_event: Optional[threading.Event] = None
+        self._extraction_output: Optional[Path] = None
 
         # Container that gets swapped between screens
         self._container = ctk.CTkFrame(self, fg_color=BG_DARK)
@@ -147,24 +154,22 @@ class SelectorView(ctk.CTkFrame):
             self._build_home()
         elif name == "existing":
             self._build_existing()
-        elif name == "new":
-            self._selected_path = None
-            self._is_encrypted = False
-            self._password = None
-            self._build_new()
+        elif name == "new_selected":
+            self._build_new_selected_screen()
 
     # ------------------------------------------------------------------
     # Helper: back button
     # ------------------------------------------------------------------
 
     def _add_back_button(self, parent):
-        ctk.CTkButton(
+        self._back_btn = ctk.CTkButton(
             parent, text="\u2190  Back",
             font=ctk.CTkFont(size=14),
             fg_color="transparent", hover_color=BG_HOVER,
-            text_color=TEXT_MUTED, width=80, height=34, anchor="w",
+            text_color=TEXT_MUTED, height=34, anchor="w",
             command=lambda: self._show_screen("home"),
-        ).pack(anchor="nw", padx=20, pady=(16, 0))
+        )
+        self._back_btn.pack(anchor="nw", padx=20, pady=(16, 0))
 
     # ------------------------------------------------------------------
     # Screen 1: Home — two centered buttons
@@ -173,12 +178,6 @@ class SelectorView(ctk.CTkFrame):
     def _build_home(self):
         center = ctk.CTkFrame(self._container, fg_color=BG_DARK)
         center.place(relx=0.5, rely=0.5, anchor="center")
-
-        ctk.CTkLabel(
-            center, text="Semantic Search for iOS Photos",
-            font=ctk.CTkFont(size=24, weight="bold"),
-            text_color=TEXT_MUTED,
-        ).pack(pady=(0, 28))
 
         ctk.CTkButton(
             center, text="Existing Extractions",
@@ -195,7 +194,7 @@ class SelectorView(ctk.CTkFrame):
             fg_color=BG_BTN, hover_color=BG_BTN_HOVER,
             text_color=TEXT_PRIMARY,
             height=48, corner_radius=10, width=220,
-            command=lambda: self._show_screen("new"),
+            command=self._browse_backup,
         ).pack()
 
     # ------------------------------------------------------------------
@@ -280,29 +279,15 @@ class SelectorView(ctk.CTkFrame):
             ).pack(side="right")
 
     # ------------------------------------------------------------------
-    # Screen 3: New Extraction
+    # Screen 3: New Extraction (post-browse, backup selected)
     # ------------------------------------------------------------------
 
-    def _build_new(self):
+    def _build_new_selected_screen(self):
+        """Show extraction UI after a backup has been selected via browse."""
         self._add_back_button(self._container)
 
-        # Centered content area
         self._new_center = ctk.CTkFrame(self._container, fg_color=BG_DARK)
         self._new_center.place(relx=0.5, rely=0.5, anchor="center")
-
-        ctk.CTkButton(
-            self._new_center, text="Browse",
-            font=ctk.CTkFont(size=14),
-            fg_color=BG_BTN, hover_color=BG_BTN_HOVER,
-            text_color=TEXT_PRIMARY,
-            height=48, corner_radius=10, width=220,
-            command=self._browse_backup,
-        ).pack()
-
-    def _build_new_selected(self):
-        """Rebuild center area after a backup is selected."""
-        for child in self._new_center.winfo_children():
-            child.destroy()
 
         # Path display
         self._path_var = tk.StringVar(value=str(self._selected_path))
@@ -436,15 +421,18 @@ class SelectorView(ctk.CTkFrame):
 
         backup_path = Path(path)
         if not (backup_path / "Manifest.plist").exists():
-            # Show error inline in the new-extraction center
-            for child in self._new_center.winfo_children():
+            # Show error inline on home screen
+            for child in self._container.winfo_children():
                 child.destroy()
+            self._add_back_button(self._container)
+            err_center = ctk.CTkFrame(self._container, fg_color=BG_DARK)
+            err_center.place(relx=0.5, rely=0.5, anchor="center")
             ctk.CTkLabel(
-                self._new_center, text="Invalid: no Manifest.plist found",
+                err_center, text="Invalid: no Manifest.plist found",
                 font=ctk.CTkFont(size=13), text_color=ERROR_COLOR,
             ).pack(pady=(0, 12))
             ctk.CTkButton(
-                self._new_center, text="Browse",
+                err_center, text="Browse Again",
                 font=ctk.CTkFont(size=14),
                 fg_color=BG_BTN, hover_color=BG_BTN_HOVER,
                 text_color=TEXT_PRIMARY,
@@ -457,7 +445,7 @@ class SelectorView(ctk.CTkFrame):
         self._is_encrypted = check_encryption_status(backup_path)
         self._password = None
 
-        self._build_new_selected()
+        self._show_screen("new_selected")
 
     def _on_extract(self):
         self._extract_btn.configure(state="disabled", text="Working...")
@@ -499,25 +487,41 @@ class SelectorView(ctk.CTkFrame):
         self._extract_btn.configure(state="disabled", text="Extracting...")
         self.status_label.configure(text="Starting extraction...", text_color=TEXT_MUTED)
 
+        # Swap back button to Stop
+        if hasattr(self, '_back_btn') and self._back_btn.winfo_exists():
+            self._back_btn.configure(text="Stop", command=self._stop_extraction)
+
+        cancel = threading.Event()
+        self._cancel_event = cancel
+
         def run():
+            output_path = None
             try:
                 backup_path = self._selected_path
                 device_name = get_backup_device_name(backup_path)
                 output_path = self.base_output / device_name
                 output_path.mkdir(parents=True, exist_ok=True)
+                self._extraction_output = output_path
                 index_dir = str(output_path / ".search_index")
 
+                def check_cancel():
+                    if cancel.is_set():
+                        raise _ExtractionCancelled()
+
                 def extract_progress(current, total, filename):
+                    check_cancel()
                     self.after(0, lambda c=current, t=total: self.status_label.configure(
                         text=f"Extracting {c}/{t}..."
                     ))
 
                 def idx_progress(current, total):
+                    check_cancel()
                     self.after(0, lambda c=current, t=total: self.status_label.configure(
                         text=f"Indexing {c}/{t}..."
                     ))
 
                 def status_update(msg):
+                    check_cancel()
                     self.after(0, lambda: self.status_label.configure(text=msg))
 
                 manifest = run_extraction(
@@ -529,17 +533,39 @@ class SelectorView(ctk.CTkFrame):
                     status_update=status_update,
                 )
 
+                if cancel.is_set():
+                    raise _ExtractionCancelled()
+
                 if manifest is None:
                     self.after(0, lambda: self._extraction_error("No images found in backup."))
                     return
 
                 self.after(0, lambda: self.app.show_gallery(str(output_path), index_dir))
 
+            except _ExtractionCancelled:
+                # Clean up partial output
+                if output_path and output_path.exists():
+                    import shutil
+                    shutil.rmtree(output_path, ignore_errors=True)
             except Exception as exc:
+                if cancel.is_set():
+                    # Cancelled during error — still clean up
+                    if output_path and output_path.exists():
+                        import shutil
+                        shutil.rmtree(output_path, ignore_errors=True)
+                    return
                 msg = str(exc)
                 self.after(0, lambda: self._extraction_error(msg))
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _stop_extraction(self):
+        """Cancel the running extraction and return to home."""
+        if self._cancel_event:
+            self._cancel_event.set()
+            self._cancel_event = None
+        self._extraction_output = None
+        self._show_screen("home")
 
     def _extraction_error(self, message: str):
         self.status_label.configure(text=f"Error: {message}", text_color=ERROR_COLOR)
@@ -1057,8 +1083,15 @@ class GalleryView(ctk.CTkFrame):
         preview.geometry("900x700")
         preview.configure(fg_color="#0a0a0a")
         preview.transient(self.app)
-        preview.grab_set()
         preview.focus_set()
+
+        def _safe_grab(event=None):
+            try:
+                preview.grab_set()
+            except Exception:
+                pass
+
+        preview.after(50, _safe_grab)
         preview.bind("<Escape>", lambda e: preview.destroy())
 
         label = ctk.CTkLabel(preview, text="Loading...", text_color=TEXT_MUTED, fg_color="#0a0a0a")

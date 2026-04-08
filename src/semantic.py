@@ -10,8 +10,11 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Optional, Callable
 
+import os
+
 import numpy as np
 import torch
+from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 import open_clip
 import faiss
@@ -57,6 +60,25 @@ def forensic_image_open(path: str) -> Image.Image:
     raise OSError(f"cannot open image file '{path}'")
 
 from .ios_backup import IMAGE_EXTENSIONS
+
+class _ImageDataset(Dataset):
+    """Dataset that loads and preprocesses images in parallel via DataLoader workers."""
+
+    def __init__(self, image_paths: List[str], preprocess):
+        self.image_paths = image_paths
+        self.preprocess = preprocess
+        self._blank = self.preprocess(Image.new("RGB", (224, 224)))
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        try:
+            img = forensic_image_open(self.image_paths[idx]).convert("RGB")
+            return self.preprocess(img)
+        except Exception:
+            return self._blank
+
 
 INDEX_FILENAME = "image_index.faiss"
 METADATA_FILENAME = "metadata.json"
@@ -124,28 +146,29 @@ class SemanticIndex:
         device = self._get_device()
         all_embeddings = []
         total = len(image_paths)
+        num_workers = min(os.cpu_count() or 1, 8)
 
-        for i in range(0, total, batch_size):
-            batch_paths = image_paths[i : i + batch_size]
-            images = []
-            for p in batch_paths:
-                try:
-                    img = forensic_image_open(p).convert("RGB")
-                    images.append(self._preprocess(img))
-                except Exception as e:
-                    logger.warning(f"Skipping unreadable image {p}: {e}")
-                    blank = Image.new("RGB", (224, 224))
-                    images.append(self._preprocess(blank))
+        dataset = _ImageDataset(image_paths, self._preprocess)
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=(device != "cpu"),
+            persistent_workers=num_workers > 0,
+        )
 
-            batch_tensor = torch.stack(images).to(device)
+        processed = 0
+        for batch_tensor in loader:
+            batch_tensor = batch_tensor.to(device, non_blocking=True)
             with torch.no_grad():
                 features = self._model.encode_image(batch_tensor)
                 features /= features.norm(dim=-1, keepdim=True)
 
             all_embeddings.append(features.cpu().numpy())
 
+            processed += batch_tensor.shape[0]
             if progress_callback:
-                progress_callback(min(i + batch_size, total), total)
+                progress_callback(min(processed, total), total)
 
         return np.concatenate(all_embeddings, axis=0).astype("float32")
 
