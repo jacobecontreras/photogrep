@@ -14,6 +14,9 @@ pip install -r requirements.txt
 # Extract images from an iOS backup
 python -m src extract --backup-path /path/to/backup
 
+# Build the CLIP search index
+python -m src index --output output_images/Device_Name
+
 # Search extracted images
 python -m src search "sunset at the beach" --output output_images/Device_Name
 
