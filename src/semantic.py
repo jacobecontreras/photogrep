@@ -226,6 +226,7 @@ class SemanticIndex:
             if file_manifest and file_id in file_manifest:
                 entry["relative_path"] = file_manifest[file_id].get("relative_path", "")
                 entry["domain"] = file_manifest[file_id].get("domain", "")
+                entry["photo_metadata"] = file_manifest[file_id].get("photo_metadata", {})
             self.metadata.append(entry)
 
         embedding_dim = embeddings.shape[1]

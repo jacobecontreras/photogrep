@@ -653,6 +653,14 @@ class iOSBackupParser:
             logger.error(f"Failed to open backup db {domain}/{relative_path}: {e}")
             return None
 
+    def open_backup_db(self, domain: str, relative_path: str) -> Optional[sqlite3.Connection]:
+        """Open a SQLite database from within the backup.
+
+        Public wrapper around _open_backup_db() for use by external modules
+        (e.g. metadata extraction).
+        """
+        return self._open_backup_db(domain, relative_path)
+
     def extract_deep_images(
         self,
         output_dir: str,
@@ -1109,6 +1117,17 @@ def run_extraction(
     deep_manifest = parser.extract_deep_images(str(output_path))
     if deep_manifest:
         manifest.update(deep_manifest)
+
+    # Photo metadata extraction (GPS, dates, media type)
+    _status("Extracting photo metadata...")
+    try:
+        from .metadata import extract_photo_metadata
+        photo_meta = extract_photo_metadata(parser, manifest, output_path)
+        for file_id, meta in photo_meta.items():
+            if file_id in manifest:
+                manifest[file_id]["photo_metadata"] = meta
+    except Exception as e:
+        logger.warning(f"Photo metadata extraction failed: {e}")
 
     # Save manifest
     manifest_path = output_path / "file_manifest.json"
