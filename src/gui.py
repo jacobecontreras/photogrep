@@ -16,6 +16,8 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 
+from datetime import datetime
+
 import customtkinter as ctk
 from PIL import Image, ImageTk
 
@@ -597,6 +599,10 @@ class GalleryView(ctk.CTkFrame):
         self._preset_buttons: dict = {}
         self._threshold_value: float = 0.20
         self._poll_id = None
+        self._date_filter_visible = False
+        self._date_from_var: Optional[tk.StringVar] = None
+        self._date_to_var: Optional[tk.StringVar] = None
+        self._date_filter_frame: Optional[ctk.CTkFrame] = None
         self._scroll_after_id = None
         self._load_generation = 0
         self._thumb_executor = ThreadPoolExecutor(max_workers=8)
@@ -695,8 +701,19 @@ class GalleryView(ctk.CTkFrame):
 
         # Search bar
         search_frame = ctk.CTkFrame(self, fg_color=BG_DARK, height=50)
-        search_frame.pack(fill="x", padx=20, pady=(12, 8))
+        self._search_frame = search_frame
+        search_frame.pack(fill="x", padx=20, pady=(12, 4))
         search_frame.pack_propagate(False)
+
+        self._filter_toggle_btn = ctk.CTkButton(
+            search_frame, text="\u2630",
+            font=ctk.CTkFont(size=14),
+            fg_color=BG_BTN, hover_color=BG_BTN_HOVER,
+            text_color=TEXT_PRIMARY,
+            width=38, height=38, corner_radius=19,
+            command=self._toggle_date_filter,
+        )
+        self._filter_toggle_btn.pack(side="right", padx=(6, 0), pady=6)
 
         self.search_entry = ctk.CTkEntry(
             search_frame,
@@ -712,6 +729,71 @@ class GalleryView(ctk.CTkFrame):
         )
         self.search_entry.pack(fill="x", pady=6)
         self.search_entry.bind("<KeyRelease>", self._on_search_key)
+
+        # Collapsible date filter row
+        self._date_from_var = tk.StringVar()
+        self._date_to_var = tk.StringVar()
+
+        self._date_filter_frame = ctk.CTkFrame(self, fg_color=BG_DARK, height=40)
+        # Not packed initially — toggled via _toggle_date_filter
+
+        ctk.CTkLabel(
+            self._date_filter_frame, text="From:",
+            font=ctk.CTkFont(size=12), text_color=TEXT_MUTED,
+        ).pack(side="left", padx=(0, 4))
+
+        self._date_from_entry = ctk.CTkEntry(
+            self._date_filter_frame,
+            textvariable=self._date_from_var,
+            placeholder_text="YYYY-MM-DD",
+            height=30, width=120,
+            font=ctk.CTkFont(size=12),
+            corner_radius=8,
+            fg_color=BG_SEARCH, border_color="#3a3a3a",
+            text_color=TEXT_PRIMARY,
+            placeholder_text_color=TEXT_DIM,
+            border_width=1,
+        )
+        self._date_from_entry.pack(side="left", padx=(0, 12))
+
+        ctk.CTkLabel(
+            self._date_filter_frame, text="To:",
+            font=ctk.CTkFont(size=12), text_color=TEXT_MUTED,
+        ).pack(side="left", padx=(0, 4))
+
+        self._date_to_entry = ctk.CTkEntry(
+            self._date_filter_frame,
+            textvariable=self._date_to_var,
+            placeholder_text="YYYY-MM-DD",
+            height=30, width=120,
+            font=ctk.CTkFont(size=12),
+            corner_radius=8,
+            fg_color=BG_SEARCH, border_color="#3a3a3a",
+            text_color=TEXT_PRIMARY,
+            placeholder_text_color=TEXT_DIM,
+            border_width=1,
+        )
+        self._date_to_entry.pack(side="left", padx=(0, 12))
+
+        self._date_apply_btn = ctk.CTkButton(
+            self._date_filter_frame, text="Apply",
+            font=ctk.CTkFont(size=12),
+            fg_color=BG_BTN, hover_color=BG_BTN_HOVER,
+            text_color=TEXT_PRIMARY,
+            height=30, corner_radius=8, width=60,
+            command=self._apply_date_filter,
+        )
+        self._date_apply_btn.pack(side="left", padx=(0, 6))
+
+        self._date_clear_btn = ctk.CTkButton(
+            self._date_filter_frame, text="Clear",
+            font=ctk.CTkFont(size=12),
+            fg_color=BG_BTN_ALT, hover_color=BG_BTN_ALT_HOVER,
+            text_color=TEXT_MUTED,
+            height=30, corner_radius=8, width=60,
+            command=self._clear_date_filter,
+        )
+        self._date_clear_btn.pack(side="left")
 
         # Canvas with scrollbar for virtual scrolling
         canvas_frame = ctk.CTkFrame(self, fg_color=BG_DARK)
@@ -1016,6 +1098,96 @@ class GalleryView(ctk.CTkFrame):
                 self.after_cancel(self._search_after_id)
             self._search_after_id = self.after(300, self._perform_search)
 
+    def _toggle_date_filter(self):
+        """Show or hide the collapsible date filter row."""
+        if self._date_filter_visible:
+            self._date_filter_frame.pack_forget()
+            self._date_filter_visible = False
+            self._filter_toggle_btn.configure(fg_color=BG_BTN)
+        else:
+            self._date_filter_frame.pack(fill="x", padx=20, pady=(0, 4),
+                                          after=self._search_frame)
+            self._date_filter_visible = True
+            self._filter_toggle_btn.configure(fg_color=ACCENT_COLOR)
+
+    def _apply_date_filter(self):
+        """Re-run the current search/display with date filtering applied."""
+        query = self.search_entry.get().strip()
+        if query:
+            self._perform_search()
+        else:
+            # Filter all images by date
+            filtered = self._filter_paths_by_date(list(self.all_image_paths))
+            self.display_paths = filtered
+            self._update_status(f"{len(filtered)} photos (date filtered)")
+            self._refresh_grid()
+
+    def _clear_date_filter(self):
+        """Clear date filter fields and re-display."""
+        self._date_from_var.set("")
+        self._date_to_var.set("")
+        query = self.search_entry.get().strip()
+        if query:
+            self._perform_search()
+        else:
+            self.display_paths = list(self.all_image_paths)
+            self._update_status(f"{len(self.all_image_paths)} photos")
+            self._refresh_grid()
+
+    def _filter_paths_by_date(self, paths: list) -> list:
+        """Filter image paths by the date range set in the filter fields.
+
+        Only filters images that have photo_metadata with date_created.
+        Images without metadata are excluded when a date filter is active.
+        """
+        date_from = self._date_from_var.get().strip() if self._date_from_var else ""
+        date_to = self._date_to_var.get().strip() if self._date_to_var else ""
+
+        if not date_from and not date_to:
+            return paths
+
+        # Validate date strings
+        try:
+            from_dt = datetime.strptime(date_from, "%Y-%m-%d") if date_from else None
+        except ValueError:
+            from_dt = None
+        try:
+            to_dt = datetime.strptime(date_to, "%Y-%m-%d") if date_to else None
+        except ValueError:
+            to_dt = None
+
+        if from_dt is None and to_dt is None:
+            return paths
+
+        if not self._file_manifest:
+            return paths
+
+        filtered = []
+        for path in paths:
+            file_id = Path(path).stem
+            meta = self._file_manifest.get(file_id, {})
+            photo_meta = meta.get("photo_metadata", {})
+            date_str = photo_meta.get("date_created")
+
+            if not date_str:
+                continue
+
+            try:
+                # Parse ISO 8601 date — take just the date portion
+                img_date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                img_date_naive = img_date.replace(tzinfo=None)
+
+                if from_dt and img_date_naive < from_dt:
+                    continue
+                if to_dt and img_date_naive > to_dt.replace(hour=23, minute=59, second=59):
+                    continue
+
+                filtered.append(path)
+            except (ValueError, TypeError):
+                continue
+
+        return filtered
+
     def _on_search_key(self, event):
         if self._active_preset:
             self._active_preset = None
@@ -1053,8 +1225,12 @@ class GalleryView(ctk.CTkFrame):
         threading.Thread(target=do_search, daemon=True).start()
 
     def _show_search_results(self, query: str, paths: List[str]):
-        self.display_paths = paths
-        self._update_status(f"{len(paths)} results for \"{query}\"")
+        filtered = self._filter_paths_by_date(paths)
+        self.display_paths = filtered
+        if len(filtered) != len(paths):
+            self._update_status(f"{len(filtered)} results for \"{query}\" (date filtered from {len(paths)})")
+        else:
+            self._update_status(f"{len(filtered)} results for \"{query}\"")
         self._refresh_grid()
 
     def _refresh_grid(self):
@@ -1097,9 +1273,6 @@ class GalleryView(ctk.CTkFrame):
         preview.after(50, _safe_grab)
         preview.bind("<Escape>", lambda e: preview.destroy())
 
-        label = ctk.CTkLabel(preview, text="Loading...", text_color=TEXT_MUTED, fg_color="#0a0a0a")
-        label.pack(expand=True, fill="both", padx=20, pady=20)
-
         if self._file_manifest:
             file_id = Path(image_path).stem
             meta = self._file_manifest.get(file_id, {})
@@ -1108,7 +1281,39 @@ class GalleryView(ctk.CTkFrame):
                 ctk.CTkLabel(
                     preview, text=rel_path,
                     font=ctk.CTkFont(size=12), text_color=TEXT_MUTED,
-                ).pack(pady=(0, 10))
+                ).pack(pady=(8, 4))
+
+            photo_meta = meta.get("photo_metadata", {})
+            if photo_meta:
+                info_parts = []
+                if photo_meta.get("date_created"):
+                    info_parts.append(photo_meta["date_created"])
+                if photo_meta.get("latitude") and photo_meta.get("longitude"):
+                    info_parts.append(f"GPS: {photo_meta['latitude']:.4f}, {photo_meta['longitude']:.4f}")
+                if photo_meta.get("media_type"):
+                    info_parts.append(photo_meta["media_type"])
+                if info_parts:
+                    ctk.CTkLabel(
+                        preview, text=" | ".join(info_parts),
+                        font=ctk.CTkFont(size=11), text_color=TEXT_DIM,
+                    ).pack(pady=(0, 2))
+
+                # Camera/lens info line
+                device_parts = []
+                if photo_meta.get("camera_make") and photo_meta.get("camera_model"):
+                    device_parts.append(f"{photo_meta['camera_make']} {photo_meta['camera_model']}")
+                elif photo_meta.get("camera_model"):
+                    device_parts.append(photo_meta["camera_model"])
+                if photo_meta.get("lens_model"):
+                    device_parts.append(photo_meta["lens_model"])
+                if device_parts:
+                    ctk.CTkLabel(
+                        preview, text=" | ".join(device_parts),
+                        font=ctk.CTkFont(size=11), text_color=TEXT_DIM,
+                    ).pack(pady=(0, 10))
+
+        label = ctk.CTkLabel(preview, text="Loading...", text_color=TEXT_MUTED, fg_color="#0a0a0a")
+        label.pack(expand=True, fill="both", padx=20, pady=20)
 
         def load():
             try:
