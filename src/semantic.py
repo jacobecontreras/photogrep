@@ -1,0 +1,239 @@
+"""
+Semantic Search Module
+
+Builds and queries a CLIP-based search index over extracted images.
+"""
+
+import json
+import logging
+from pathlib import Path
+from dataclasses import dataclass
+from typing import List, Optional, Callable
+
+import numpy as np
+import torch
+from PIL import Image
+import open_clip
+import faiss
+
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except ImportError:
+    pass
+
+logger = logging.getLogger(__name__)
+
+
+def forensic_image_open(path: str) -> Image.Image:
+    """Open an image file, handling base64-encoded content in-memory.
+
+    Some iOS backup artifacts store images as base64 text (e.g. iMessage
+    attachments, app caches).  This function detects that case and decodes
+    in-memory without modifying the original file on disk, preserving
+    forensic integrity of the extracted evidence.
+    """
+    import base64
+    import io
+
+    try:
+        return Image.open(path)
+    except Exception:
+        pass
+
+    # Check if the file contains base64-encoded image data
+    with open(path, "rb") as f:
+        head = f.read(32)
+
+    # base64-encoded JPEG starts with /9j/, PNG with iVBOR
+    if head[:4] in (b"/9j/", b"iVBO"):
+        with open(path, "rb") as f:
+            raw = f.read()
+        decoded = base64.b64decode(raw)
+        img = Image.open(io.BytesIO(decoded))
+        logger.debug(f"Decoded base64 image: {path}")
+        return img
+
+    raise OSError(f"cannot open image file '{path}'")
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".dng", ".thm"}
+
+INDEX_FILENAME = "image_index.faiss"
+METADATA_FILENAME = "metadata.json"
+
+
+@dataclass
+class SearchResult:
+    file_path: str
+    score: float
+
+
+class SemanticIndex:
+    """CLIP-based semantic search index for images."""
+
+    def __init__(
+        self,
+        index_dir: str,
+        model_name: str = "ViT-B-32",
+        pretrained: str = "laion2b_s34b_b79k",
+    ):
+        self.index_dir = Path(index_dir)
+        self.model_name = model_name
+        self.pretrained = pretrained
+
+        self._model = None
+        self._preprocess = None
+        self._tokenizer = None
+        self._device = None
+
+        self.faiss_index: Optional[faiss.Index] = None
+        self.metadata: List[dict] = []
+
+        if (self.index_dir / INDEX_FILENAME).exists():
+            self._load_index()
+
+    def _get_device(self) -> str:
+        if self._device is None:
+            if torch.backends.mps.is_available():
+                self._device = "mps"
+            elif torch.cuda.is_available():
+                self._device = "cuda"
+            else:
+                self._device = "cpu"
+            logger.info(f"Using device: {self._device}")
+        return self._device
+
+    def _load_model(self):
+        if self._model is not None:
+            return
+        device = self._get_device()
+        self._model, _, self._preprocess = open_clip.create_model_and_transforms(
+            self.model_name, pretrained=self.pretrained
+        )
+        self._model = self._model.to(device).eval()
+        self._tokenizer = open_clip.get_tokenizer(self.model_name)
+
+    def _encode_images_batch(
+        self,
+        image_paths: List[str],
+        batch_size: int = 32,
+        progress_callback: Optional[Callable] = None,
+    ) -> np.ndarray:
+        """Batch-encode images with CLIP. Returns L2-normalized embeddings."""
+        self._load_model()
+        device = self._get_device()
+        all_embeddings = []
+        total = len(image_paths)
+
+        for i in range(0, total, batch_size):
+            batch_paths = image_paths[i : i + batch_size]
+            images = []
+            for p in batch_paths:
+                try:
+                    img = forensic_image_open(p).convert("RGB")
+                    images.append(self._preprocess(img))
+                except Exception as e:
+                    logger.warning(f"Skipping unreadable image {p}: {e}")
+                    blank = Image.new("RGB", (224, 224))
+                    images.append(self._preprocess(blank))
+
+            batch_tensor = torch.stack(images).to(device)
+            with torch.no_grad():
+                features = self._model.encode_image(batch_tensor)
+                features /= features.norm(dim=-1, keepdim=True)
+
+            all_embeddings.append(features.cpu().numpy())
+
+            if progress_callback:
+                progress_callback(min(i + batch_size, total), total)
+
+        return np.concatenate(all_embeddings, axis=0).astype("float32")
+
+    def _encode_text(self, text: str) -> np.ndarray:
+        """Encode a text query with CLIP. Returns L2-normalized embedding."""
+        self._load_model()
+        device = self._get_device()
+        tokens = self._tokenizer([text]).to(device)
+        with torch.no_grad():
+            features = self._model.encode_text(tokens)
+            features /= features.norm(dim=-1, keepdim=True)
+        return features.cpu().numpy().astype("float32")
+
+    def build_index(
+        self,
+        image_dir: str,
+        file_manifest: Optional[dict] = None,
+        progress_callback: Optional[Callable] = None,
+    ):
+        """Build the search index from a directory of extracted images."""
+        image_dir = Path(image_dir)
+
+        image_paths = sorted(
+            str(p) for p in image_dir.rglob("*")
+            if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+            and not p.parent.name.startswith(".")
+        )
+
+        if not image_paths:
+            print("No images found to index.")
+            return
+
+        total_images = len(image_paths)
+        print(f"Indexing {total_images} images...")
+        print("\nGenerating CLIP embeddings...")
+
+        embeddings = self._encode_images_batch(image_paths, progress_callback=progress_callback)
+
+        self.metadata = []
+        for img_path in image_paths:
+            file_id = Path(img_path).stem
+            entry = {
+                "file_path": img_path,
+                "file_id": file_id,
+            }
+            if file_manifest and file_id in file_manifest:
+                entry["relative_path"] = file_manifest[file_id].get("relative_path", "")
+                entry["domain"] = file_manifest[file_id].get("domain", "")
+            self.metadata.append(entry)
+
+        embedding_dim = embeddings.shape[1]
+        self.faiss_index = faiss.IndexFlatIP(embedding_dim)
+        faiss.normalize_L2(embeddings)
+        self.faiss_index.add(embeddings)
+
+        self._save_index()
+        print(f"\nIndex saved to {self.index_dir}")
+
+    def search(self, query: str, threshold: float = 0.20) -> List[SearchResult]:
+        """Search images by text query, returning all results above a score threshold."""
+        if self.faiss_index is None or not self.metadata:
+            raise RuntimeError("No index loaded. Run 'index' first.")
+
+        query_embedding = self._encode_text(query)
+        faiss.normalize_L2(query_embedding)
+        scores, indices = self.faiss_index.search(query_embedding, len(self.metadata))
+
+        results = []
+        for score, idx in zip(scores[0], indices[0]):
+            if idx < 0 or float(score) < threshold:
+                continue
+            meta = self.metadata[idx]
+            results.append(SearchResult(
+                file_path=meta["file_path"],
+                score=float(score),
+            ))
+
+        results.sort(key=lambda r: r.score, reverse=True)
+        return results
+
+    def _save_index(self):
+        self.index_dir.mkdir(parents=True, exist_ok=True)
+        faiss.write_index(self.faiss_index, str(self.index_dir / INDEX_FILENAME))
+        with open(self.index_dir / METADATA_FILENAME, "w") as f:
+            json.dump(self.metadata, f)
+
+    def _load_index(self):
+        self.faiss_index = faiss.read_index(str(self.index_dir / INDEX_FILENAME))
+        with open(self.index_dir / METADATA_FILENAME) as f:
+            self.metadata = json.load(f)
+        logger.info(f"Loaded index with {len(self.metadata)} images")
