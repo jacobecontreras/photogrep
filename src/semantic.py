@@ -130,6 +130,8 @@ class SemanticIndex:
         if self._model is not None:
             return
         device = self._get_device()
+        if device == "cuda":
+            torch.backends.cudnn.benchmark = True
         self._model, _, self._preprocess = open_clip.create_model_and_transforms(
             self.model_name, pretrained=self.pretrained
         )
@@ -155,7 +157,7 @@ class SemanticIndex:
             dataset,
             batch_size=batch_size,
             num_workers=num_workers,
-            pin_memory=(device != "cpu"),
+            pin_memory=(device == "cuda"),
             persistent_workers=num_workers > 0,
         )
 
@@ -164,7 +166,7 @@ class SemanticIndex:
             batch_tensor = batch_tensor.to(device, non_blocking=True)
             with torch.no_grad():
                 if use_amp:
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast("cuda"):
                         features = self._model.encode_image(batch_tensor)
                 else:
                     features = self._model.encode_image(batch_tensor)
