@@ -1,6 +1,7 @@
 import os
-# Prevent libomp segfaults when FAISS/PyTorch run from background threads on macOS
+# Prevent libomp crashes when FAISS and PyTorch both link their own copy on macOS
 os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 from .cli import main
 
