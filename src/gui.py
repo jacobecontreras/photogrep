@@ -1280,47 +1280,67 @@ class GalleryView(ctk.CTkFrame):
         preview.after(50, _safe_grab)
         preview.bind("<Escape>", lambda e: preview.destroy())
 
+        # Get metadata
+        photo_meta = {}
+        rel_path = ""
         if self._file_manifest:
             file_id = Path(image_path).stem
             meta = self._file_manifest.get(file_id, {})
             rel_path = meta.get("relative_path", "")
-            if rel_path:
-                ctk.CTkLabel(
-                    preview, text=rel_path,
-                    font=ctk.CTkFont(size=12), text_color=TEXT_MUTED,
-                ).pack(pady=(8, 4))
-
             photo_meta = meta.get("photo_metadata", {})
-            if photo_meta:
-                info_parts = []
-                if photo_meta.get("date_created"):
-                    info_parts.append(photo_meta["date_created"])
-                if photo_meta.get("latitude") and photo_meta.get("longitude"):
-                    info_parts.append(f"GPS: {photo_meta['latitude']:.4f}, {photo_meta['longitude']:.4f}")
-                if photo_meta.get("media_type"):
-                    info_parts.append(photo_meta["media_type"])
-                if info_parts:
-                    ctk.CTkLabel(
-                        preview, text=" | ".join(info_parts),
-                        font=ctk.CTkFont(size=11), text_color=TEXT_DIM,
-                    ).pack(pady=(0, 2))
 
-                # Camera/lens info line
-                device_parts = []
-                if photo_meta.get("camera_make") and photo_meta.get("camera_model"):
-                    device_parts.append(f"{photo_meta['camera_make']} {photo_meta['camera_model']}")
-                elif photo_meta.get("camera_model"):
-                    device_parts.append(photo_meta["camera_model"])
-                if photo_meta.get("lens_model"):
-                    device_parts.append(photo_meta["lens_model"])
-                if device_parts:
-                    ctk.CTkLabel(
-                        preview, text=" | ".join(device_parts),
-                        font=ctk.CTkFont(size=11), text_color=TEXT_DIM,
-                    ).pack(pady=(0, 10))
+        # Main horizontal container
+        content_frame = ctk.CTkFrame(preview, fg_color="#0a0a0a")
+        content_frame.pack(fill="both", expand=True)
 
-        label = ctk.CTkLabel(preview, text="Loading...", text_color=TEXT_MUTED, fg_color="#0a0a0a")
-        label.pack(expand=True, fill="both", padx=20, pady=20)
+        # Sidebar (hidden by default)
+        sidebar = ctk.CTkFrame(content_frame, fg_color=BG_CARD, width=280)
+        sidebar_visible = [False]
+
+        # Image area (left side)
+        image_frame = ctk.CTkFrame(content_frame, fg_color="#0a0a0a")
+        image_frame.pack(side="left", fill="both", expand=True)
+
+        # Info button in top-right corner of image area
+        btn_bar = ctk.CTkFrame(image_frame, fg_color="#0a0a0a", height=36)
+        btn_bar.pack(fill="x", padx=8, pady=(8, 0))
+        btn_bar.pack_propagate(False)
+
+        if rel_path:
+            ctk.CTkLabel(
+                btn_bar, text=rel_path,
+                font=ctk.CTkFont(size=11), text_color=TEXT_MUTED,
+                anchor="w",
+            ).pack(side="left", padx=4)
+
+        def toggle_sidebar():
+            if sidebar_visible[0]:
+                sidebar.pack_forget()
+                preview.geometry("900x700")
+                info_btn.configure(fg_color=BG_BTN)
+                sidebar_visible[0] = False
+            else:
+                sidebar.pack(side="right", fill="y", padx=(0, 0))
+                preview.geometry("1180x700")
+                info_btn.configure(fg_color=ACCENT_COLOR)
+                sidebar_visible[0] = True
+
+        info_btn = ctk.CTkButton(
+            btn_bar, text="\u2139  Info",
+            font=ctk.CTkFont(size=12),
+            fg_color=BG_BTN, hover_color=BG_BTN_HOVER,
+            text_color=TEXT_PRIMARY,
+            width=70, height=28, corner_radius=14,
+            command=toggle_sidebar,
+        )
+        info_btn.pack(side="right", padx=4)
+
+        # Populate sidebar content
+        self._build_info_sidebar(sidebar, photo_meta, rel_path)
+
+        # Image label
+        label = ctk.CTkLabel(image_frame, text="Loading...", text_color=TEXT_MUTED, fg_color="#0a0a0a")
+        label.pack(expand=True, fill="both", padx=20, pady=(4, 20))
 
         def load():
             try:
@@ -1344,6 +1364,180 @@ class GalleryView(ctk.CTkFrame):
                 self.after(0, show_error)
 
         threading.Thread(target=load, daemon=True).start()
+
+    def _build_info_sidebar(self, sidebar, photo_meta: dict, rel_path: str):
+        """Build the scrollable metadata sidebar content."""
+        # Scrollable inner frame
+        canvas = tk.Canvas(sidebar, bg=BG_CARD, highlightthickness=0, width=264)
+        scrollbar = ctk.CTkScrollbar(sidebar, command=canvas.yview)
+        inner = ctk.CTkFrame(canvas, fg_color=BG_CARD)
+
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw", width=264)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
+        scrollbar.pack(side="right", fill="y", pady=8)
+
+        # Mouse wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _on_button4(event):
+            canvas.yview_scroll(-3, "units")
+
+        def _on_button5(event):
+            canvas.yview_scroll(3, "units")
+
+        for widget in (canvas, inner):
+            widget.bind("<MouseWheel>", _on_mousewheel)
+            widget.bind("<Button-4>", _on_button4)
+            widget.bind("<Button-5>", _on_button5)
+
+        if not photo_meta:
+            ctk.CTkLabel(
+                inner, text="No metadata available",
+                font=ctk.CTkFont(size=12), text_color=TEXT_DIM,
+            ).pack(padx=8, pady=20)
+            return
+
+        def add_section(title):
+            ctk.CTkLabel(
+                inner, text=title,
+                font=ctk.CTkFont(size=13, weight="bold"), text_color=TEXT_PRIMARY,
+                anchor="w",
+            ).pack(fill="x", padx=8, pady=(12, 4))
+            # Separator line
+            sep = ctk.CTkFrame(inner, fg_color=BG_HOVER, height=1)
+            sep.pack(fill="x", padx=8, pady=(0, 6))
+
+        def add_field(label_text, value):
+            if value is None:
+                return
+            row = ctk.CTkFrame(inner, fg_color=BG_CARD)
+            row.pack(fill="x", padx=8, pady=1)
+            ctk.CTkLabel(
+                row, text=label_text,
+                font=ctk.CTkFont(size=11), text_color=TEXT_DIM,
+                width=100, anchor="w",
+            ).pack(side="left")
+            ctk.CTkLabel(
+                row, text=str(value),
+                font=ctk.CTkFont(size=11), text_color=TEXT_PRIMARY,
+                anchor="w", wraplength=150,
+            ).pack(side="left", fill="x", expand=True)
+
+        # --- General ---
+        add_section("General")
+        add_field("Filename", photo_meta.get("original_filename"))
+        fs = photo_meta.get("original_file_size")
+        if fs is not None:
+            if fs >= 1_048_576:
+                add_field("File size", f"{fs / 1_048_576:.1f} MB")
+            elif fs >= 1024:
+                add_field("File size", f"{fs / 1024:.0f} KB")
+            else:
+                add_field("File size", f"{fs} B")
+        add_field("Type", photo_meta.get("uniform_type"))
+        add_field("Created", photo_meta.get("date_created"))
+        add_field("Modified", photo_meta.get("date_modified"))
+        add_field("Added", photo_meta.get("date_added"))
+        add_field("Last shared", photo_meta.get("last_shared_date"))
+        add_field("Media type", photo_meta.get("media_type"))
+        dur = photo_meta.get("duration")
+        if dur is not None:
+            mins, secs = divmod(dur, 60)
+            add_field("Duration", f"{int(mins)}:{secs:05.2f}")
+        if rel_path:
+            add_field("File path", rel_path)
+
+        # --- Location ---
+        lat = photo_meta.get("latitude")
+        lon = photo_meta.get("longitude")
+        if lat is not None or lon is not None:
+            add_section("Location")
+            add_field("Latitude", f"{lat:.6f}" if lat is not None else None)
+            add_field("Longitude", f"{lon:.6f}" if lon is not None else None)
+
+        # --- Camera ---
+        camera_fields = ["camera_make", "camera_model", "lens_model", "iso",
+                         "aperture", "focal_length", "focal_length_35mm",
+                         "shutter_speed", "flash_fired", "metering_mode", "white_balance"]
+        if any(photo_meta.get(f) is not None for f in camera_fields):
+            add_section("Camera")
+            make = photo_meta.get("camera_make")
+            model = photo_meta.get("camera_model")
+            if make and model:
+                add_field("Device", f"{make} {model}")
+            elif model:
+                add_field("Device", model)
+            elif make:
+                add_field("Device", make)
+            add_field("Lens", photo_meta.get("lens_model"))
+            iso = photo_meta.get("iso")
+            if iso is not None:
+                add_field("ISO", str(int(iso)))
+            ap = photo_meta.get("aperture")
+            if ap is not None:
+                add_field("Aperture", f"f/{ap:.1f}")
+            fl = photo_meta.get("focal_length")
+            if fl is not None:
+                add_field("Focal length", f"{fl:.1f}mm")
+            fl35 = photo_meta.get("focal_length_35mm")
+            if fl35 is not None:
+                add_field("35mm equiv", f"{fl35:.0f}mm")
+            ss = photo_meta.get("shutter_speed")
+            if ss is not None:
+                if ss >= 1:
+                    add_field("Shutter", f"{ss:.1f}s")
+                else:
+                    add_field("Shutter", f"1/{int(round(1/ss))}s")
+            flash = photo_meta.get("flash_fired")
+            if flash is not None:
+                add_field("Flash", "Yes" if flash else "No")
+            mm = photo_meta.get("metering_mode")
+            if mm is not None:
+                metering_names = {0: "Unknown", 1: "Average", 2: "Center-weighted",
+                                  3: "Spot", 4: "Multi-spot", 5: "Pattern", 6: "Partial"}
+                add_field("Metering", metering_names.get(mm, str(mm)))
+            wb = photo_meta.get("white_balance")
+            if wb is not None:
+                add_field("White bal.", "Auto" if wb == 0 else "Manual" if wb == 1 else str(wb))
+
+        # --- Dimensions ---
+        dim_fields = ["width", "height", "original_width", "original_height", "color_space", "hdr_gain"]
+        if any(photo_meta.get(f) is not None for f in dim_fields):
+            add_section("Dimensions")
+            w, h = photo_meta.get("width"), photo_meta.get("height")
+            if w is not None and h is not None:
+                add_field("Size", f"{w} \u00d7 {h}")
+            ow, oh = photo_meta.get("original_width"), photo_meta.get("original_height")
+            if ow is not None and oh is not None:
+                add_field("Original", f"{ow} \u00d7 {oh}")
+            cs = photo_meta.get("color_space")
+            if cs is not None:
+                cs_names = {1: "sRGB", 2: "Adobe RGB", 65535: "Uncalibrated"}
+                add_field("Color space", cs_names.get(cs, str(cs)))
+            hdr = photo_meta.get("hdr_gain")
+            if hdr is not None:
+                add_field("HDR gain", f"{hdr:.2f}")
+
+        # --- Status ---
+        status_fields = ["favorite", "hidden", "trashed", "view_count", "play_count"]
+        if any(photo_meta.get(f) is not None for f in status_fields):
+            add_section("Status")
+            fav = photo_meta.get("favorite")
+            if fav is not None:
+                add_field("Favorite", "Yes" if fav else "No")
+            hid = photo_meta.get("hidden")
+            if hid is not None:
+                add_field("Hidden", "Yes" if hid else "No")
+            tr = photo_meta.get("trashed")
+            if tr is not None:
+                add_field("Trashed", "Yes" if tr else "No")
+            add_field("Views", photo_meta.get("view_count"))
+            add_field("Plays", photo_meta.get("play_count"))
+            add_field("Source", photo_meta.get("source_db"))
 
 
 

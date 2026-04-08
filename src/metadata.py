@@ -89,45 +89,60 @@ def _extract_exif(image_path: str) -> dict:
 
     Returns a metadata dict with the unified schema keys populated where available.
     """
-    meta = {
-        "latitude": None,
-        "longitude": None,
-        "date_created": None,
-        "media_type": None,
-        "favorite": None,
-        "hidden": None,
-        "trashed": None,
-        "camera_make": None,
-        "camera_model": None,
-        "lens_model": None,
-        "original_filename": None,
-        "source_db": "exif",
-    }
+    meta = _empty_meta("exif")
 
     try:
         img = Image.open(image_path)
+
+        # Image dimensions
+        if img.size:
+            meta["width"] = img.size[0]
+            meta["height"] = img.size[1]
+
         exif = img.getexif()
         if not exif:
             return meta
 
-        # Camera make — tag 271, Camera model — tag 272
-        make = exif.get(271)
-        if make:
-            meta["camera_make"] = str(make).strip()
-        model = exif.get(272)
-        if model:
-            meta["camera_model"] = str(model).strip()
+        # Camera make (271) / model (272)
+        _set_str(meta, "camera_make", exif.get(271))
+        _set_str(meta, "camera_model", exif.get(272))
 
-        # EXIF IFD — DateTimeOriginal (36867), LensModel (42036)
+        # EXIF IFD
         try:
             exif_ifd = exif.get_ifd(IFD.Exif)
+            # DateTimeOriginal (36867)
             date_str = exif_ifd.get(36867)
             if date_str:
                 dt = datetime.strptime(str(date_str), "%Y:%m:%d %H:%M:%S")
                 meta["date_created"] = dt.isoformat()
-            lens = exif_ifd.get(42036)
-            if lens:
-                meta["lens_model"] = str(lens).strip()
+            # LensModel (42036)
+            _set_str(meta, "lens_model", exif_ifd.get(42036))
+            # ISO (34855)
+            _set_float(meta, "iso", exif_ifd.get(34855))
+            # FNumber / Aperture (33437)
+            aperture = exif_ifd.get(33437)
+            if aperture is not None:
+                meta["aperture"] = round(float(aperture), 2)
+            # FocalLength (37386)
+            fl = exif_ifd.get(37386)
+            if fl is not None:
+                meta["focal_length"] = round(float(fl), 2)
+            # FocalLengthIn35mm (41989)
+            fl35 = exif_ifd.get(41989)
+            if fl35 is not None:
+                meta["focal_length_35mm"] = round(float(fl35), 2)
+            # ExposureTime / ShutterSpeed (33434)
+            ss = exif_ifd.get(33434)
+            if ss is not None:
+                meta["shutter_speed"] = float(ss)
+            # Flash (37385)
+            flash = exif_ifd.get(37385)
+            if flash is not None:
+                meta["flash_fired"] = bool(flash & 1)  # bit 0 = fired
+            # WhiteBalance (41987)
+            _set_int(meta, "white_balance", exif_ifd.get(41987))
+            # MeteringMode (37383)
+            _set_int(meta, "metering_mode", exif_ifd.get(37383))
         except Exception:
             pass
 
@@ -146,6 +161,50 @@ def _extract_exif(image_path: str) -> dict:
         logger.debug(f"EXIF extraction failed for {image_path}: {e}")
 
     return meta
+
+
+def _empty_meta(source: str = None) -> dict:
+    """Return a metadata dict with all keys set to None."""
+    return {
+        "original_filename": None, "original_file_size": None,
+        "uniform_type": None,
+        "date_created": None, "date_modified": None,
+        "date_added": None, "last_shared_date": None,
+        "media_type": None, "duration": None,
+        "latitude": None, "longitude": None,
+        "camera_make": None, "camera_model": None, "lens_model": None,
+        "iso": None, "aperture": None,
+        "focal_length": None, "focal_length_35mm": None,
+        "shutter_speed": None, "flash_fired": None,
+        "metering_mode": None, "white_balance": None,
+        "width": None, "height": None,
+        "original_width": None, "original_height": None,
+        "color_space": None, "hdr_gain": None,
+        "favorite": None, "hidden": None, "trashed": None,
+        "view_count": None, "play_count": None,
+        "source_db": source,
+    }
+
+
+def _set_str(meta: dict, key: str, val):
+    if val is not None:
+        meta[key] = str(val).strip()
+
+
+def _set_int(meta: dict, key: str, val):
+    if val is not None:
+        try:
+            meta[key] = int(val)
+        except (ValueError, TypeError):
+            pass
+
+
+def _set_float(meta: dict, key: str, val):
+    if val is not None:
+        try:
+            meta[key] = round(float(val), 4)
+        except (ValueError, TypeError):
+            pass
 
 
 def _query_photos_sqlite(conn: sqlite3.Connection) -> list:
@@ -176,12 +235,24 @@ def _query_photos_sqlite(conn: sqlite3.Connection) -> list:
     except Exception:
         pass
 
+    # Discover ZEXTENDEDATTRIBUTES columns
+    ext_cols = set()
+    has_ext_table = False
+    try:
+        cursor.execute("PRAGMA table_info(ZEXTENDEDATTRIBUTES)")
+        ext_cols = {row[1] for row in cursor.fetchall()}
+        has_ext_table = len(ext_cols) > 0
+    except Exception:
+        pass
+
     # Base ZASSET columns (always expected)
     asset_base = ["ZFILENAME", "ZDIRECTORY", "ZLATITUDE", "ZLONGITUDE", "ZDATECREATED"]
     # Optional ZASSET columns
     asset_optional = [
         "ZKIND", "ZKINDSUBTYPE", "ZFAVORITE", "ZHIDDEN",
         "ZTRASHEDSTATE", "ZUNIFORMTYPEIDENTIFIER", "ZDURATION",
+        "ZMODIFICATIONDATE", "ZADDEDDATE", "ZLASTSHAREDDATE",
+        "ZWIDTH", "ZHEIGHT", "ZORIGINALCOLORSPACE", "ZHDRGAIN",
     ]
 
     select_parts = []
@@ -195,10 +266,12 @@ def _query_photos_sqlite(conn: sqlite3.Connection) -> list:
         if col in asset_cols:
             select_parts.append(f"A.{col}")
 
-    # ZADDITIONALASSETATTRIBUTES columns we care about
+    # ZADDITIONALASSETATTRIBUTES columns
     addl_wanted = [
         "ZCAMERAMAKE", "ZCAMERAMODEL", "ZLENSMODEL",
         "ZORIGINALFILENAME", "ZEXIFTIMESTAMPSTRING",
+        "ZORIGINALFILESIZE", "ZORIGINALWIDTH", "ZORIGINALHEIGHT",
+        "ZVIEWCOUNT", "ZPLAYCOUNT",
     ]
     joined_addl = []
     for col in addl_wanted:
@@ -206,9 +279,24 @@ def _query_photos_sqlite(conn: sqlite3.Connection) -> list:
             select_parts.append(f"AA.{col}")
             joined_addl.append(col)
 
+    # ZEXTENDEDATTRIBUTES columns (camera/EXIF data)
+    ext_wanted = [
+        "ZISO", "ZAPERTURE", "ZFOCALLENGTH", "ZFOCALLENGTHIN35MM",
+        "ZSHUTTERSPEED", "ZFLASHFIRED", "ZMETERINGMODE", "ZWHITEBALANCE",
+        "ZCAMERAMAKE", "ZCAMERAMODEL", "ZLENSMODEL",
+    ]
+    joined_ext = []
+    for col in ext_wanted:
+        if col in ext_cols:
+            # Alias extended attrs columns to avoid name collision with addl attrs
+            select_parts.append(f"EA.{col} AS EA_{col}")
+            joined_ext.append(col)
+
     query = f"SELECT {', '.join(select_parts)} FROM ZASSET A"
     if has_addl_table and joined_addl:
         query += " LEFT JOIN ZADDITIONALASSETATTRIBUTES AA ON AA.ZASSET = A.Z_PK"
+    if has_ext_table and joined_ext:
+        query += " LEFT JOIN ZEXTENDEDATTRIBUTES EA ON EA.ZASSET = A.Z_PK"
 
     try:
         cursor.execute(query)
@@ -253,20 +341,7 @@ def extract_photo_metadata(parser, manifest: dict, output_dir,
 
                     key = f"{directory}/{filename}"
 
-                    meta = {
-                        "latitude": None,
-                        "longitude": None,
-                        "date_created": None,
-                        "media_type": None,
-                        "favorite": None,
-                        "hidden": None,
-                        "trashed": None,
-                        "camera_make": None,
-                        "camera_model": None,
-                        "lens_model": None,
-                        "original_filename": None,
-                        "source_db": "photos.sqlite",
-                    }
+                    meta = _empty_meta("photos.sqlite")
 
                     lat = row.get("ZLATITUDE")
                     lon = row.get("ZLONGITUDE")
@@ -274,36 +349,66 @@ def extract_photo_metadata(parser, manifest: dict, output_dir,
                         meta["latitude"] = round(float(lat), 6)
                         meta["longitude"] = round(float(lon), 6)
 
+                    # Dates (Core Data timestamps)
                     meta["date_created"] = _convert_core_data_timestamp(row.get("ZDATECREATED"))
+                    meta["date_modified"] = _convert_core_data_timestamp(row.get("ZMODIFICATIONDATE"))
+                    meta["date_added"] = _convert_core_data_timestamp(row.get("ZADDEDDATE"))
+                    meta["last_shared_date"] = _convert_core_data_timestamp(row.get("ZLASTSHAREDDATE"))
 
+                    # Media type
                     kind = row.get("ZKIND")
                     subtype = row.get("ZKINDSUBTYPE")
                     uti = row.get("ZUNIFORMTYPEIDENTIFIER")
                     meta["media_type"] = _map_media_type(kind, subtype, uti)
+                    if uti:
+                        meta["uniform_type"] = str(uti)
 
-                    if "ZFAVORITE" in row:
-                        val = row["ZFAVORITE"]
-                        meta["favorite"] = bool(val) if val is not None else None
-                    if "ZHIDDEN" in row:
-                        val = row["ZHIDDEN"]
-                        meta["hidden"] = bool(val) if val is not None else None
-                    if "ZTRASHEDSTATE" in row:
-                        val = row["ZTRASHEDSTATE"]
-                        meta["trashed"] = bool(val) if val is not None else None
+                    # Duration
+                    dur = row.get("ZDURATION")
+                    if dur is not None and dur > 0:
+                        meta["duration"] = round(float(dur), 2)
 
-                    # ZADDITIONALASSETATTRIBUTES fields
-                    camera_make = row.get("ZCAMERAMAKE")
-                    camera_model = row.get("ZCAMERAMODEL")
-                    if camera_make:
-                        meta["camera_make"] = str(camera_make).strip()
-                    if camera_model:
-                        meta["camera_model"] = str(camera_model).strip()
-                    lens = row.get("ZLENSMODEL")
-                    if lens:
-                        meta["lens_model"] = str(lens).strip()
-                    orig_name = row.get("ZORIGINALFILENAME")
-                    if orig_name:
-                        meta["original_filename"] = str(orig_name).strip()
+                    # Dimensions
+                    _set_int(meta, "width", row.get("ZWIDTH"))
+                    _set_int(meta, "height", row.get("ZHEIGHT"))
+                    _set_int(meta, "original_width", row.get("ZORIGINALWIDTH"))
+                    _set_int(meta, "original_height", row.get("ZORIGINALHEIGHT"))
+                    _set_int(meta, "color_space", row.get("ZORIGINALCOLORSPACE"))
+
+                    hdr = row.get("ZHDRGAIN")
+                    if hdr is not None:
+                        meta["hdr_gain"] = round(float(hdr), 4)
+
+                    # Status flags
+                    for db_col, key in [("ZFAVORITE", "favorite"), ("ZHIDDEN", "hidden"), ("ZTRASHEDSTATE", "trashed")]:
+                        if db_col in row:
+                            val = row[db_col]
+                            meta[key] = bool(val) if val is not None else None
+
+                    # View/play counts
+                    _set_int(meta, "view_count", row.get("ZVIEWCOUNT"))
+                    _set_int(meta, "play_count", row.get("ZPLAYCOUNT"))
+
+                    # Original file info (ZADDITIONALASSETATTRIBUTES)
+                    _set_int(meta, "original_file_size", row.get("ZORIGINALFILESIZE"))
+                    _set_str(meta, "original_filename", row.get("ZORIGINALFILENAME"))
+
+                    # Camera/lens — prefer ZEXTENDEDATTRIBUTES, fall back to ZADDITIONALASSETATTRIBUTES
+                    _set_str(meta, "camera_make", row.get("EA_ZCAMERAMAKE") or row.get("ZCAMERAMAKE"))
+                    _set_str(meta, "camera_model", row.get("EA_ZCAMERAMODEL") or row.get("ZCAMERAMODEL"))
+                    _set_str(meta, "lens_model", row.get("EA_ZLENSMODEL") or row.get("ZLENSMODEL"))
+
+                    # EXIF data (ZEXTENDEDATTRIBUTES)
+                    _set_float(meta, "iso", row.get("EA_ZISO"))
+                    _set_float(meta, "aperture", row.get("EA_ZAPERTURE"))
+                    _set_float(meta, "focal_length", row.get("EA_ZFOCALLENGTH"))
+                    _set_float(meta, "focal_length_35mm", row.get("EA_ZFOCALLENGTHIN35MM"))
+                    _set_float(meta, "shutter_speed", row.get("EA_ZSHUTTERSPEED"))
+                    _set_int(meta, "metering_mode", row.get("EA_ZMETERINGMODE"))
+                    _set_int(meta, "white_balance", row.get("EA_ZWHITEBALANCE"))
+                    flash = row.get("EA_ZFLASHFIRED")
+                    if flash is not None:
+                        meta["flash_fired"] = bool(flash)
 
                     db_meta[key] = meta
 
