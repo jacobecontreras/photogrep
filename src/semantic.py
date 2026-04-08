@@ -76,7 +76,8 @@ class _ImageDataset(Dataset):
         try:
             img = forensic_image_open(self.image_paths[idx]).convert("RGB")
             return self.preprocess(img)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Skipping unreadable image {self.image_paths[idx]}: {e}")
             return self._blank
 
 
@@ -138,7 +139,7 @@ class SemanticIndex:
     def _encode_images_batch(
         self,
         image_paths: List[str],
-        batch_size: int = 32,
+        batch_size: int = 64,
         progress_callback: Optional[Callable] = None,
     ) -> np.ndarray:
         """Batch-encode images with CLIP. Returns L2-normalized embeddings."""
@@ -147,6 +148,7 @@ class SemanticIndex:
         all_embeddings = []
         total = len(image_paths)
         num_workers = min(os.cpu_count() or 1, 8)
+        use_amp = device == "cuda"
 
         dataset = _ImageDataset(image_paths, self._preprocess)
         loader = DataLoader(
@@ -161,16 +163,21 @@ class SemanticIndex:
         for batch_tensor in loader:
             batch_tensor = batch_tensor.to(device, non_blocking=True)
             with torch.no_grad():
-                features = self._model.encode_image(batch_tensor)
+                if use_amp:
+                    with torch.cuda.amp.autocast():
+                        features = self._model.encode_image(batch_tensor)
+                else:
+                    features = self._model.encode_image(batch_tensor)
+                features = features.float()
                 features /= features.norm(dim=-1, keepdim=True)
 
-            all_embeddings.append(features.cpu().numpy())
+            all_embeddings.append(features.cpu())
 
             processed += batch_tensor.shape[0]
             if progress_callback:
                 progress_callback(min(processed, total), total)
 
-        return np.concatenate(all_embeddings, axis=0).astype("float32")
+        return torch.cat(all_embeddings, dim=0).numpy().astype("float32")
 
     def _encode_text(self, text: str) -> np.ndarray:
         """Encode a text query with CLIP. Returns L2-normalized embedding."""
