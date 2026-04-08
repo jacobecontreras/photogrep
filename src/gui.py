@@ -638,7 +638,7 @@ class GalleryView(ctk.CTkFrame):
 
     def _build_ui(self):
         # Top bar
-        top_frame = ctk.CTkFrame(self, fg_color=BG_DARK, height=60)
+        top_frame = ctk.CTkFrame(self, fg_color=BG_DARK, height=50)
         top_frame.pack(fill="x", padx=20, pady=(16, 0))
         top_frame.pack_propagate(False)
 
@@ -657,6 +657,41 @@ class GalleryView(ctk.CTkFrame):
             text_color=TEXT_PRIMARY,
         )
         title.pack(side="left", padx=12, pady=8)
+
+        # Threshold slider (right side of top bar)
+        self._threshold_label = ctk.CTkLabel(
+            top_frame, text="0.20",
+            font=ctk.CTkFont(size=11), text_color=TEXT_MUTED, width=32,
+        )
+        self._threshold_label.pack(side="right", padx=(0, 4), pady=8)
+
+        self._threshold_slider = ctk.CTkSlider(
+            top_frame, from_=0.15, to=0.40,
+            number_of_steps=25, width=100, height=16,
+            button_color=ACCENT_COLOR, button_hover_color=ACCENT_HOVER,
+            progress_color=BG_BTN, fg_color=BG_SEARCH,
+            command=self._on_threshold_change,
+        )
+        self._threshold_slider.set(0.20)
+        self._threshold_slider.pack(side="right", padx=2, pady=8)
+
+        ctk.CTkLabel(
+            top_frame, text="Threshold:",
+            font=ctk.CTkFont(size=11), text_color=TEXT_MUTED,
+        ).pack(side="right", padx=(16, 0), pady=8)
+
+        # Preset filter chips (right side of top bar, before threshold)
+        for name in reversed(list(SEARCH_PRESETS)):
+            btn = ctk.CTkButton(
+                top_frame, text=name,
+                font=ctk.CTkFont(size=12),
+                fg_color=BG_BTN, hover_color=BG_BTN_HOVER,
+                text_color=TEXT_PRIMARY,
+                height=30, corner_radius=15, width=0,
+                command=lambda n=name: self._on_preset_click(n),
+            )
+            btn.pack(side="right", padx=3, pady=8)
+            self._preset_buttons[name] = btn
 
         # Search bar
         search_frame = ctk.CTkFrame(self, fg_color=BG_DARK, height=50)
@@ -678,45 +713,6 @@ class GalleryView(ctk.CTkFrame):
         self.search_entry.pack(fill="x", pady=6)
         self.search_entry.bind("<KeyRelease>", self._on_search_key)
 
-        # Preset filter chips
-        preset_frame = ctk.CTkFrame(self, fg_color=BG_DARK, height=40)
-        preset_frame.pack(fill="x", padx=20, pady=(4, 8))
-        preset_frame.pack_propagate(False)
-
-        for name in SEARCH_PRESETS:
-            btn = ctk.CTkButton(
-                preset_frame, text=name,
-                font=ctk.CTkFont(size=12),
-                fg_color=BG_BTN, hover_color=BG_BTN_HOVER,
-                text_color=TEXT_PRIMARY,
-                height=30, corner_radius=15, width=0,
-                command=lambda n=name: self._on_preset_click(n),
-            )
-            btn.pack(side="left", padx=3, pady=4)
-            self._preset_buttons[name] = btn
-
-        # Threshold slider (right-aligned in preset row)
-        self._threshold_label = ctk.CTkLabel(
-            preset_frame, text="0.20",
-            font=ctk.CTkFont(size=11), text_color=TEXT_MUTED, width=32,
-        )
-        self._threshold_label.pack(side="right", padx=(0, 4), pady=4)
-
-        self._threshold_slider = ctk.CTkSlider(
-            preset_frame, from_=0.15, to=0.40,
-            number_of_steps=25, width=100, height=16,
-            button_color=ACCENT_COLOR, button_hover_color=ACCENT_HOVER,
-            progress_color=BG_BTN, fg_color=BG_SEARCH,
-            command=self._on_threshold_change,
-        )
-        self._threshold_slider.set(0.20)
-        self._threshold_slider.pack(side="right", padx=2, pady=4)
-
-        ctk.CTkLabel(
-            preset_frame, text="Threshold:",
-            font=ctk.CTkFont(size=11), text_color=TEXT_MUTED,
-        ).pack(side="right", padx=(4, 0), pady=4)
-
         # Canvas with scrollbar for virtual scrolling
         canvas_frame = ctk.CTkFrame(self, fg_color=BG_DARK)
         canvas_frame.pack(fill="both", expand=True, padx=16, pady=(0, 0))
@@ -726,7 +722,14 @@ class GalleryView(ctk.CTkFrame):
             borderwidth=0, relief="flat",
         )
         self.scrollbar = ctk.CTkScrollbar(canvas_frame, command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        def _on_scroll_change(*args):
+            self.scrollbar.set(*args)
+            if self._scroll_after_id is not None:
+                self.after_cancel(self._scroll_after_id)
+            self._scroll_after_id = self.after(40, self._render_visible)
+
+        self.canvas.configure(yscrollcommand=_on_scroll_change)
         # Pixel-based scroll increment for smooth cross-platform scrolling
         self.canvas.configure(yscrollincrement=4)
 
