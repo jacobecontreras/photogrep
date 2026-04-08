@@ -6,6 +6,7 @@ Uses a raw tk.Canvas with virtual scrolling for performance with thousands of im
 """
 
 import json
+import sys
 import threading
 import queue
 import tkinter as tk
@@ -64,11 +65,6 @@ SEARCH_PRESETS = {
 
 THUMB_SIZE = 150
 CELL_SIZE = THUMB_SIZE + 8  # thumb + padding
-
-
-def _dir_has_images(path: Path) -> bool:
-    """Quick check if a directory contains any image files."""
-    return any(p.suffix.lower() in IMAGE_EXTENSIONS for p in path.rglob("*") if p.is_file())
 
 
 def _count_images(path: Path) -> int:
@@ -209,10 +205,23 @@ class SelectorView(ctk.CTkFrame):
     def _build_existing(self):
         self._add_back_button(self._container)
 
-        existing = self._find_existing_phones()
+        # Show loading state while scanning in background
+        self._existing_loading = ctk.CTkLabel(
+            self._container, text="Scanning...",
+            font=ctk.CTkFont(size=14), text_color=TEXT_MUTED,
+        )
+        self._existing_loading.place(relx=0.5, rely=0.5, anchor="center")
+
+        def scan():
+            existing = self._find_existing_phones()
+            self.after(0, lambda: self._populate_existing(existing))
+
+        threading.Thread(target=scan, daemon=True).start()
+
+    def _populate_existing(self, existing):
+        self._existing_loading.destroy()
 
         if not existing:
-            # Centered empty-state message
             msg = ctk.CTkFrame(self._container, fg_color=BG_DARK)
             msg.place(relx=0.5, rely=0.5, anchor="center")
             ctk.CTkLabel(
@@ -361,9 +370,10 @@ class SelectorView(ctk.CTkFrame):
         if not self.base_output.exists():
             return results
         for sub in sorted(self.base_output.iterdir()):
-            if sub.is_dir() and _dir_has_images(sub):
+            if sub.is_dir():
                 count = _count_images(sub)
-                results.append((sub, count))
+                if count > 0:
+                    results.append((sub, count))
         return results
 
     def _open_phone(self, phone_dir: Path):
@@ -562,15 +572,15 @@ class GalleryView(ctk.CTkFrame):
         self._threshold_value: float = 0.20
         self._poll_id = None
         self._scroll_after_id = None
+        self._load_generation = 0
+        self._thumb_executor = ThreadPoolExecutor(max_workers=8)
 
         # Thumbnail cache dir
         self.thumb_dir = self.image_dir / ".thumbnails"
         self.thumb_dir.mkdir(exist_ok=True)
 
         self._build_ui()
-        self._collect_image_paths()
-        self.display_paths = list(self.all_image_paths)
-        self._update_status(f"{len(self.all_image_paths)} photos")
+        self._update_status("Loading photos...")
 
         # Load manifest
         manifest_path = self.image_dir / "file_manifest.json"
@@ -583,6 +593,19 @@ class GalleryView(ctk.CTkFrame):
 
         # Load search index in background
         threading.Thread(target=self._load_search_index, daemon=True).start()
+
+        # Collect image paths in background to avoid blocking UI
+        def _collect_and_display():
+            self._collect_image_paths()
+            paths = list(self.all_image_paths)
+            def apply():
+                self.display_paths = paths
+                self._path_idx_cache = {p: i for i, p in enumerate(self.display_paths)}
+                self._update_status(f"{len(self.all_image_paths)} photos")
+                self._full_layout()
+            self.after(0, apply)
+
+        threading.Thread(target=_collect_and_display, daemon=True).start()
 
         # Initial layout after window is mapped
         self.after(100, self._full_layout)
@@ -678,12 +701,16 @@ class GalleryView(ctk.CTkFrame):
         )
         self.scrollbar = ctk.CTkScrollbar(canvas_frame, command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        # Pixel-based scroll increment for smooth cross-platform scrolling
+        self.canvas.configure(yscrollincrement=4)
 
         self.scrollbar.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
 
-        # Mouse wheel scrolling
+        # Mouse wheel scrolling (platform-specific bindings)
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind("<Button-4>", self._on_mousewheel)
+        self.canvas.bind("<Button-5>", self._on_mousewheel)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
         self.canvas.bind("<Button-1>", self._on_canvas_click)
 
@@ -695,6 +722,7 @@ class GalleryView(ctk.CTkFrame):
         self.status_label.pack(fill="x", padx=20, pady=(4, 10))
 
     def _go_back(self):
+        self._thumb_executor.shutdown(wait=False)
         self.app.show_selector()
 
     # --- LRU thumbnail cache ---
@@ -758,8 +786,8 @@ class GalleryView(ctk.CTkFrame):
         y_top = self.canvas.canvasy(0)
         y_bottom = y_top + canvas_height
 
-        first_row = max(0, int(y_top // CELL_SIZE) - 2)
-        last_row = int(y_bottom // CELL_SIZE) + 2
+        first_row = max(0, int(y_top // CELL_SIZE) - 4)
+        last_row = int(y_bottom // CELL_SIZE) + 4
 
         first_idx = first_row * self._columns
         last_idx = min((last_row + 1) * self._columns, len(self.display_paths))
@@ -802,18 +830,24 @@ class GalleryView(ctk.CTkFrame):
             self._rendered_indices.add(idx)
 
         if paths_to_load:
-            threading.Thread(
-                target=self._load_thumbnails_batch,
-                args=(paths_to_load,),
-                daemon=True,
-            ).start()
+            gen = self._load_generation
+            self._load_thumbnails_batch(paths_to_load, gen)
             self._start_polling()
 
     def _on_mousewheel(self, event):
-        self.canvas.yview_scroll(-event.delta, "units")
+        if event.num == 4:
+            delta = -5
+        elif event.num == 5:
+            delta = 5
+        elif sys.platform == "darwin":
+            delta = -event.delta
+        else:
+            delta = int(-event.delta / 24)
+
+        self.canvas.yview_scroll(delta, "units")
         if self._scroll_after_id is not None:
             self.after_cancel(self._scroll_after_id)
-        self._scroll_after_id = self.after(10, self._render_visible)
+        self._scroll_after_id = self.after(40, self._render_visible)
 
     def _on_canvas_configure(self, event):
         new_cols = max(2, event.width // CELL_SIZE)
@@ -852,7 +886,12 @@ class GalleryView(ctk.CTkFrame):
                 pass
 
         try:
-            img = forensic_image_open(image_path).convert("RGB")
+            try:
+                img = Image.open(image_path)
+                img.draft("RGB", (THUMB_SIZE * 2, THUMB_SIZE * 2))
+                img = img.convert("RGB")
+            except Exception:
+                img = forensic_image_open(image_path).convert("RGB")
             w, h = img.size
             side = min(w, h)
             left = (w - side) // 2
@@ -864,14 +903,16 @@ class GalleryView(ctk.CTkFrame):
         except Exception:
             return None
 
-    def _load_thumbnails_batch(self, paths: List[str]):
+    def _load_thumbnails_batch(self, paths: List[str], generation: int):
         def worker(path):
+            if self._load_generation != generation:
+                return
             img = self._generate_thumbnail(path)
-            if img:
-                self.thumb_queue.put((path, img))
+            if img and self._load_generation == generation:
+                self.thumb_queue.put((path, img, generation))
 
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            executor.map(worker, paths)
+        for path in paths:
+            self._thumb_executor.submit(worker, path)
 
     def _start_polling(self):
         """Start the thumbnail poll loop if not already running."""
@@ -882,14 +923,16 @@ class GalleryView(ctk.CTkFrame):
         """Poll queue and update canvas items for loaded thumbnails."""
         self._poll_id = None
         count = 0
-        while count < 50:
+        while count < 15:
             try:
-                path, pil_img = self.thumb_queue.get_nowait()
+                path, pil_img, gen = self.thumb_queue.get_nowait()
+                if gen != self._load_generation:
+                    continue
                 photo = ImageTk.PhotoImage(pil_img)
                 self._cache_put(path, photo)
                 self._loading_paths.discard(path)
 
-                idx = self._path_to_index.get(path)
+                idx = self._path_idx_cache.get(path)
                 if idx is not None:
                     if idx in self._rendered_indices:
                         tag = f"t{idx}"
@@ -986,10 +1029,22 @@ class GalleryView(ctk.CTkFrame):
         self._refresh_grid()
 
     def _refresh_grid(self):
+        self._load_generation += 1
+        self._path_idx_cache = {p: i for i, p in enumerate(self.display_paths)}
+        self._loading_paths.clear()
+        self._drain_stale_queue()
         self.canvas.delete("thumb")
         self._rendered_indices.clear()
         self._full_layout()
         self.canvas.yview_moveto(0)
+
+    def _drain_stale_queue(self):
+        """Discard all pending items in thumb_queue."""
+        while True:
+            try:
+                self.thumb_queue.get_nowait()
+            except queue.Empty:
+                break
 
     def _update_status(self, text: str):
         self.status_label.configure(text=text)
@@ -1004,39 +1059,44 @@ class GalleryView(ctk.CTkFrame):
         preview.transient(self.app)
         preview.grab_set()
         preview.focus_set()
-
-        try:
-            img = forensic_image_open(image_path).convert("RGB")
-            max_w, max_h = 860, 620
-            img.thumbnail((max_w, max_h), Image.LANCZOS)
-            photo = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
-
-            label = ctk.CTkLabel(preview, image=photo, text="", fg_color="#0a0a0a")
-            label.pack(expand=True, fill="both", padx=20, pady=20)
-
-            if self._file_manifest:
-                file_id = Path(image_path).stem
-                meta = self._file_manifest.get(file_id, {})
-                rel_path = meta.get("relative_path", "")
-                if rel_path:
-                    ctk.CTkLabel(
-                        preview, text=rel_path,
-                        font=ctk.CTkFont(size=12), text_color=TEXT_MUTED,
-                    ).pack(pady=(0, 10))
-
-        except Exception as exc:
-            ctk.CTkLabel(
-                preview, text=f"Cannot open image:\n{exc}", text_color=TEXT_MUTED,
-            ).pack(expand=True)
-
         preview.bind("<Escape>", lambda e: preview.destroy())
 
-    @property
-    def _path_to_index(self) -> dict:
-        if not hasattr(self, '_path_idx_cache') or self._path_idx_cache_id != id(self.display_paths):
-            self._path_idx_cache = {p: i for i, p in enumerate(self.display_paths)}
-            self._path_idx_cache_id = id(self.display_paths)
-        return self._path_idx_cache
+        label = ctk.CTkLabel(preview, text="Loading...", text_color=TEXT_MUTED, fg_color="#0a0a0a")
+        label.pack(expand=True, fill="both", padx=20, pady=20)
+
+        if self._file_manifest:
+            file_id = Path(image_path).stem
+            meta = self._file_manifest.get(file_id, {})
+            rel_path = meta.get("relative_path", "")
+            if rel_path:
+                ctk.CTkLabel(
+                    preview, text=rel_path,
+                    font=ctk.CTkFont(size=12), text_color=TEXT_MUTED,
+                ).pack(pady=(0, 10))
+
+        def load():
+            try:
+                img = forensic_image_open(image_path).convert("RGB")
+                max_w, max_h = 860, 620
+                img.thumbnail((max_w, max_h), Image.LANCZOS)
+
+                def show(img=img):
+                    if not preview.winfo_exists():
+                        return
+                    photo = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+                    label.configure(image=photo, text="")
+                    label._preview_photo = photo
+
+                self.after(0, show)
+            except Exception as exc:
+                def show_error(exc=exc):
+                    if not preview.winfo_exists():
+                        return
+                    label.configure(text=f"Cannot open image:\n{exc}")
+                self.after(0, show_error)
+
+        threading.Thread(target=load, daemon=True).start()
+
 
 
 def launch(base_output: str = "output_images"):
