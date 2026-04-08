@@ -183,7 +183,7 @@ def cmd_search(args):
         return
 
     index = SemanticIndex(str(index_dir))
-    results = index.search(args.query, top_k=args.top_k)
+    results = index.search(args.query, threshold=args.threshold)
 
     if not results:
         print("No results found.")
@@ -224,7 +224,7 @@ def main():
     # search
     search_parser = subparsers.add_parser("search", help="Search images by text query")
     search_parser.add_argument("query", help="Text query (e.g., 'sunset', 'weapon')")
-    search_parser.add_argument("--top-k", type=int, default=10, help="Number of results (default: 10)")
+    search_parser.add_argument("--threshold", type=float, default=0.20, help="Minimum similarity score (default: 0.20)")
     search_parser.add_argument("--output", required=True, help="Device image directory with index")
 
     # gui
