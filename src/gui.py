@@ -881,8 +881,8 @@ class GalleryView(ctk.CTkFrame):
                 self._cache_put(path, photo)
                 self._loading_paths.discard(path)
 
-                if path in self.display_paths:
-                    idx = self.display_paths.index(path)
+                idx = self._path_to_index.get(path)
+                if idx is not None:
                     if idx in self._rendered_indices:
                         tag = f"t{idx}"
                         self.canvas.delete(tag)
