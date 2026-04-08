@@ -1,4 +1,4 @@
-# photogrep
+# photoGrep
 
 Extract images from encrypted iOS backups and search them with natural language using CLIP.
 
