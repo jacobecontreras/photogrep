@@ -1061,6 +1061,7 @@ def run_extraction(
     password: Optional[str] = None,
     extract_progress: Optional[Callable] = None,
     index_progress: Optional[Callable] = None,
+    metadata_progress: Optional[Callable] = None,
     status_update: Optional[Callable] = None,
 ) -> Optional[dict]:
     """Run the full extraction pipeline: decrypt, extract, deep-extract, index.
@@ -1122,7 +1123,8 @@ def run_extraction(
     _status("Extracting photo metadata...")
     try:
         from .metadata import extract_photo_metadata
-        photo_meta = extract_photo_metadata(parser, manifest, output_path)
+        photo_meta = extract_photo_metadata(parser, manifest, output_path,
+                                               progress_callback=metadata_progress)
         for file_id, meta in photo_meta.items():
             if file_id in manifest:
                 manifest[file_id]["photo_metadata"] = meta

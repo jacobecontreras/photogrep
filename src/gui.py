@@ -516,6 +516,12 @@ class SelectorView(ctk.CTkFrame):
                         text=f"Extracting {c}/{t}..."
                     ))
 
+                def meta_progress(current, total):
+                    check_cancel()
+                    self.after(0, lambda c=current, t=total: self.status_label.configure(
+                        text=f"Extracting metadata {c}/{t}..."
+                    ))
+
                 def idx_progress(current, total):
                     check_cancel()
                     self.after(0, lambda c=current, t=total: self.status_label.configure(
@@ -531,6 +537,7 @@ class SelectorView(ctk.CTkFrame):
                     output_path,
                     password=password,
                     extract_progress=extract_progress,
+                    metadata_progress=meta_progress,
                     index_progress=idx_progress,
                     status_update=status_update,
                 )
