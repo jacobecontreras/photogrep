@@ -9,6 +9,7 @@ import json
 import threading
 import queue
 import tkinter as tk
+from collections import OrderedDict
 from tkinter import filedialog
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -547,7 +548,8 @@ class GalleryView(ctk.CTkFrame):
         self.index_dir = index_dir
         self.all_image_paths: List[str] = []
         self.display_paths: List[str] = []
-        self.thumb_cache: dict = {}
+        self.thumb_cache: OrderedDict = OrderedDict()
+        self._thumb_cache_max = 512
         self.thumb_queue = queue.Queue()
         self._search_after_id = None
         self._search_index = None
@@ -696,6 +698,22 @@ class GalleryView(ctk.CTkFrame):
     def _go_back(self):
         self.app.show_selector()
 
+    # --- LRU thumbnail cache ---
+
+    def _cache_get(self, path: str) -> Optional[ImageTk.PhotoImage]:
+        """Get thumbnail from cache, updating LRU order."""
+        if path in self.thumb_cache:
+            self.thumb_cache.move_to_end(path)
+            return self.thumb_cache[path]
+        return None
+
+    def _cache_put(self, path: str, photo: ImageTk.PhotoImage):
+        """Insert thumbnail into cache, evicting oldest if over limit."""
+        self.thumb_cache[path] = photo
+        self.thumb_cache.move_to_end(path)
+        while len(self.thumb_cache) > self._thumb_cache_max:
+            self.thumb_cache.popitem(last=False)
+
     def _collect_image_paths(self):
         image_dir = Path(self.image_dir)
         self.all_image_paths = sorted(
@@ -769,8 +787,8 @@ class GalleryView(ctk.CTkFrame):
             y = row * CELL_SIZE + CELL_SIZE // 2
             tag = f"t{idx}"
 
-            if path in self.thumb_cache:
-                photo = self.thumb_cache[path]
+            photo = self._cache_get(path)
+            if photo is not None:
                 self.canvas.create_image(x, y, image=photo, anchor="center", tags=("thumb", tag))
             else:
                 half = THUMB_SIZE // 2
@@ -860,7 +878,7 @@ class GalleryView(ctk.CTkFrame):
             try:
                 path, pil_img = self.thumb_queue.get_nowait()
                 photo = ImageTk.PhotoImage(pil_img)
-                self.thumb_cache[path] = photo
+                self._cache_put(path, photo)
                 self._loading_paths.discard(path)
 
                 if path in self.display_paths:
