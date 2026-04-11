@@ -606,9 +606,6 @@ class GalleryView(ctk.CTkFrame):
         self._preset_buttons: dict = {}
         self._threshold_value: float = 0.20
         self._poll_id = None
-        self._date_filter_visible = False
-        self._date_from_var: Optional[tk.StringVar] = None
-        self._date_to_var: Optional[tk.StringVar] = None
         self._date_filter_frame: Optional[ctk.CTkFrame] = None
         self._scroll_after_id = None
         self._load_generation = 0
@@ -671,56 +668,11 @@ class GalleryView(ctk.CTkFrame):
         )
         title.pack(side="left", padx=12, pady=8)
 
-        # Threshold slider (right side of top bar)
-        self._threshold_label = ctk.CTkLabel(
-            top_frame, text="0.20",
-            font=ctk.CTkFont(size=11), text_color=TEXT_MUTED, width=32,
-        )
-        self._threshold_label.pack(side="right", padx=(0, 4), pady=8)
-
-        self._threshold_slider = ctk.CTkSlider(
-            top_frame, from_=0.15, to=0.40,
-            number_of_steps=25, width=100, height=16,
-            button_color=ACCENT_COLOR, button_hover_color=ACCENT_HOVER,
-            progress_color=BG_BTN, fg_color=BG_SEARCH,
-            command=self._on_threshold_change,
-        )
-        self._threshold_slider.set(0.20)
-        self._threshold_slider.pack(side="right", padx=2, pady=8)
-
-        ctk.CTkLabel(
-            top_frame, text="Threshold:",
-            font=ctk.CTkFont(size=11), text_color=TEXT_MUTED,
-        ).pack(side="right", padx=(16, 0), pady=8)
-
-        # Preset filter chips (right side of top bar, before threshold)
-        for name in reversed(list(SEARCH_PRESETS)):
-            btn = ctk.CTkButton(
-                top_frame, text=name,
-                font=ctk.CTkFont(size=12),
-                fg_color=BG_BTN, hover_color=BG_BTN_HOVER,
-                text_color=TEXT_PRIMARY,
-                height=30, corner_radius=15, width=0,
-                command=lambda n=name: self._on_preset_click(n),
-            )
-            btn.pack(side="right", padx=3, pady=8)
-            self._preset_buttons[name] = btn
-
         # Search bar
         search_frame = ctk.CTkFrame(self, fg_color=BG_DARK, height=50)
         self._search_frame = search_frame
-        search_frame.pack(fill="x", padx=20, pady=(12, 4))
+        search_frame.pack(fill="x", padx=20, pady=(12, 0))
         search_frame.pack_propagate(False)
-
-        self._filter_toggle_btn = ctk.CTkButton(
-            search_frame, text="\u2630",
-            font=ctk.CTkFont(size=14),
-            fg_color=BG_BTN, hover_color=BG_BTN_HOVER,
-            text_color=TEXT_PRIMARY,
-            width=38, height=38, corner_radius=19,
-            command=self._toggle_date_filter,
-        )
-        self._filter_toggle_btn.pack(side="right", padx=(6, 0), pady=6)
 
         self.search_entry = ctk.CTkEntry(
             search_frame,
@@ -737,70 +689,109 @@ class GalleryView(ctk.CTkFrame):
         self.search_entry.pack(fill="x", pady=6)
         self.search_entry.bind("<KeyRelease>", self._on_search_key)
 
-        # Collapsible date filter row
-        self._date_from_var = tk.StringVar()
-        self._date_to_var = tk.StringVar()
+        # Controls row — presets, date range, threshold
+        controls_frame = ctk.CTkFrame(self, fg_color=BG_DARK)
+        controls_frame.pack(fill="x", padx=20, pady=(4, 4))
 
-        self._date_filter_frame = ctk.CTkFrame(self, fg_color=BG_DARK, height=40)
-        # Not packed initially — toggled via _toggle_date_filter
+        # Preset filter chips
+        for name in list(SEARCH_PRESETS):
+            btn = ctk.CTkButton(
+                controls_frame, text=name,
+                font=ctk.CTkFont(size=12),
+                fg_color=BG_BTN, hover_color=BG_BTN_HOVER,
+                text_color=TEXT_PRIMARY,
+                height=28, corner_radius=14, width=0,
+                command=lambda n=name: self._on_preset_click(n),
+            )
+            btn.pack(side="left", padx=(0, 4), pady=4)
+            self._preset_buttons[name] = btn
 
+        # Separator
         ctk.CTkLabel(
-            self._date_filter_frame, text="From:",
-            font=ctk.CTkFont(size=12), text_color=TEXT_MUTED,
-        ).pack(side="left", padx=(0, 4))
+            controls_frame, text="|",
+            font=ctk.CTkFont(size=12), text_color=TEXT_DIM,
+        ).pack(side="left", padx=(8, 8), pady=4)
+
+        # Date range controls
+        ctk.CTkLabel(
+            controls_frame, text="From:",
+            font=ctk.CTkFont(size=11), text_color=TEXT_MUTED,
+        ).pack(side="left", padx=(0, 4), pady=4)
 
         self._date_from_entry = ctk.CTkEntry(
-            self._date_filter_frame,
-            textvariable=self._date_from_var,
+            controls_frame,
             placeholder_text="YYYY-MM-DD",
-            height=30, width=120,
-            font=ctk.CTkFont(size=12),
+            height=28, width=105,
+            font=ctk.CTkFont(size=11),
             corner_radius=8,
             fg_color=BG_SEARCH, border_color="#3a3a3a",
             text_color=TEXT_PRIMARY,
-            placeholder_text_color=TEXT_DIM,
+            placeholder_text_color=TEXT_MUTED,
             border_width=1,
         )
-        self._date_from_entry.pack(side="left", padx=(0, 12))
+        self._date_from_entry.pack(side="left", padx=(0, 6), pady=4)
+        self._date_from_entry.bind("<KeyRelease>", lambda e: self._auto_format_date(self._date_from_entry))
 
         ctk.CTkLabel(
-            self._date_filter_frame, text="To:",
-            font=ctk.CTkFont(size=12), text_color=TEXT_MUTED,
-        ).pack(side="left", padx=(0, 4))
+            controls_frame, text="To:",
+            font=ctk.CTkFont(size=11), text_color=TEXT_MUTED,
+        ).pack(side="left", padx=(0, 4), pady=4)
 
         self._date_to_entry = ctk.CTkEntry(
-            self._date_filter_frame,
-            textvariable=self._date_to_var,
+            controls_frame,
             placeholder_text="YYYY-MM-DD",
-            height=30, width=120,
-            font=ctk.CTkFont(size=12),
+            height=28, width=105,
+            font=ctk.CTkFont(size=11),
             corner_radius=8,
             fg_color=BG_SEARCH, border_color="#3a3a3a",
             text_color=TEXT_PRIMARY,
-            placeholder_text_color=TEXT_DIM,
+            placeholder_text_color=TEXT_MUTED,
             border_width=1,
         )
-        self._date_to_entry.pack(side="left", padx=(0, 12))
+        self._date_to_entry.pack(side="left", padx=(0, 6), pady=4)
+        self._date_to_entry.bind("<KeyRelease>", lambda e: self._auto_format_date(self._date_to_entry))
 
         self._date_apply_btn = ctk.CTkButton(
-            self._date_filter_frame, text="Apply",
-            font=ctk.CTkFont(size=12),
+            controls_frame, text="Apply",
+            font=ctk.CTkFont(size=11),
             fg_color=BG_BTN, hover_color=BG_BTN_HOVER,
             text_color=TEXT_PRIMARY,
-            height=30, corner_radius=8, width=60,
+            height=28, corner_radius=8, width=50,
             command=self._apply_date_filter,
         )
-        self._date_apply_btn.pack(side="left", padx=(0, 6))
+        self._date_apply_btn.pack(side="left", padx=(0, 4), pady=4)
 
         self._date_clear_btn = ctk.CTkButton(
-            self._date_filter_frame, text="Clear",
-            font=ctk.CTkFont(size=12),
+            controls_frame, text="Clear",
+            font=ctk.CTkFont(size=11),
             fg_color=BG_BTN_ALT, hover_color=BG_BTN_ALT_HOVER,
             text_color=TEXT_MUTED,
-            height=30, corner_radius=8, width=60,
+            height=28, corner_radius=8, width=50,
             command=self._clear_date_filter,
         )
-        self._date_clear_btn.pack(side="left")
+        self._date_clear_btn.pack(side="left", pady=4)
+
+        # Threshold slider (right side)
+        self._threshold_label = ctk.CTkLabel(
+            controls_frame, text="0.20",
+            font=ctk.CTkFont(size=11), text_color=TEXT_MUTED, width=32,
+        )
+        self._threshold_label.pack(side="right", padx=(0, 4), pady=4)
+
+        self._threshold_slider = ctk.CTkSlider(
+            controls_frame, from_=0.15, to=0.40,
+            number_of_steps=25, width=100, height=16,
+            button_color=ACCENT_COLOR, button_hover_color=ACCENT_HOVER,
+            progress_color=BG_BTN, fg_color=BG_SEARCH,
+            command=self._on_threshold_change,
+        )
+        self._threshold_slider.set(0.20)
+        self._threshold_slider.pack(side="right", padx=2, pady=4)
+
+        ctk.CTkLabel(
+            controls_frame, text="Threshold:",
+            font=ctk.CTkFont(size=11), text_color=TEXT_MUTED,
+        ).pack(side="right", padx=(8, 0), pady=4)
 
         # Canvas with scrollbar for virtual scrolling
         canvas_frame = ctk.CTkFrame(self, fg_color=BG_DARK)
@@ -1105,17 +1096,21 @@ class GalleryView(ctk.CTkFrame):
                 self.after_cancel(self._search_after_id)
             self._search_after_id = self.after(300, self._perform_search)
 
-    def _toggle_date_filter(self):
-        """Show or hide the collapsible date filter row."""
-        if self._date_filter_visible:
-            self._date_filter_frame.pack_forget()
-            self._date_filter_visible = False
-            self._filter_toggle_btn.configure(fg_color=BG_BTN)
-        else:
-            self._date_filter_frame.pack(fill="x", padx=20, pady=(0, 4),
-                                          after=self._search_frame)
-            self._date_filter_visible = True
-            self._filter_toggle_btn.configure(fg_color=ACCENT_COLOR)
+    @staticmethod
+    def _auto_format_date(entry):
+        """Auto-insert hyphens and enforce YYYY-MM-DD format as user types."""
+        raw = entry.get()
+        # Strip non-digit characters, then rebuild with hyphens
+        digits = "".join(c for c in raw if c.isdigit())
+        digits = digits[:8]  # max 8 digits (YYYYMMDD)
+        formatted = ""
+        for i, d in enumerate(digits):
+            if i == 4 or i == 6:
+                formatted += "-"
+            formatted += d
+        if formatted != raw:
+            entry.delete(0, "end")
+            entry.insert(0, formatted)
 
     def _apply_date_filter(self):
         """Re-run the current search/display with date filtering applied."""
@@ -1131,8 +1126,8 @@ class GalleryView(ctk.CTkFrame):
 
     def _clear_date_filter(self):
         """Clear date filter fields and re-display."""
-        self._date_from_var.set("")
-        self._date_to_var.set("")
+        self._date_from_entry.delete(0, "end")
+        self._date_to_entry.delete(0, "end")
         query = self.search_entry.get().strip()
         if query:
             self._perform_search()
@@ -1147,8 +1142,8 @@ class GalleryView(ctk.CTkFrame):
         Only filters images that have photo_metadata with date_created.
         Images without metadata are excluded when a date filter is active.
         """
-        date_from = self._date_from_var.get().strip() if self._date_from_var else ""
-        date_to = self._date_to_var.get().strip() if self._date_to_var else ""
+        date_from = self._date_from_entry.get().strip() if self._date_from_entry else ""
+        date_to = self._date_to_entry.get().strip() if self._date_to_entry else ""
 
         if not date_from and not date_to:
             return paths
