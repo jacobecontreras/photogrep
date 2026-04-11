@@ -607,6 +607,7 @@ class GalleryView(ctk.CTkFrame):
         self._threshold_value: float = 0.20
         self._poll_id = None
         self._date_filter_frame: Optional[ctk.CTkFrame] = None
+        self._sort_order: Optional[str] = None  # None, "newest", or "oldest"
         self._scroll_after_id = None
         self._load_generation = 0
         self._thumb_executor = ThreadPoolExecutor(max_workers=8)
@@ -635,7 +636,7 @@ class GalleryView(ctk.CTkFrame):
             self._collect_image_paths()
             paths = list(self.all_image_paths)
             def apply():
-                self.display_paths = paths
+                self.display_paths = self._maybe_sort(paths)
                 self._path_idx_cache = {p: i for i, p in enumerate(self.display_paths)}
                 self._update_status(f"{len(self.all_image_paths)} photos")
                 self._full_layout()
@@ -667,6 +668,28 @@ class GalleryView(ctk.CTkFrame):
             text_color=TEXT_PRIMARY,
         )
         title.pack(side="left", padx=12, pady=8)
+
+        # Threshold slider (right side of header)
+        self._threshold_label = ctk.CTkLabel(
+            top_frame, text="0.20",
+            font=ctk.CTkFont(size=11), text_color=TEXT_MUTED, width=32,
+        )
+        self._threshold_label.pack(side="right", padx=(0, 4), pady=8)
+
+        self._threshold_slider = ctk.CTkSlider(
+            top_frame, from_=0.15, to=0.40,
+            number_of_steps=25, width=100, height=16,
+            button_color=ACCENT_COLOR, button_hover_color=ACCENT_HOVER,
+            progress_color=BG_BTN, fg_color=BG_SEARCH,
+            command=self._on_threshold_change,
+        )
+        self._threshold_slider.set(0.20)
+        self._threshold_slider.pack(side="right", padx=2, pady=8)
+
+        ctk.CTkLabel(
+            top_frame, text="Threshold:",
+            font=ctk.CTkFont(size=11), text_color=TEXT_MUTED,
+        ).pack(side="right", padx=(16, 0), pady=8)
 
         # Search bar
         search_frame = ctk.CTkFrame(self, fg_color=BG_DARK, height=50)
@@ -771,27 +794,31 @@ class GalleryView(ctk.CTkFrame):
         )
         self._date_clear_btn.pack(side="left", pady=4)
 
-        # Threshold slider (right side)
-        self._threshold_label = ctk.CTkLabel(
-            controls_frame, text="0.20",
-            font=ctk.CTkFont(size=11), text_color=TEXT_MUTED, width=32,
+        # Sort toggle (right side of controls row)
+        self._sort_oldest_btn = ctk.CTkButton(
+            controls_frame, text="Oldest",
+            font=ctk.CTkFont(size=11),
+            fg_color=BG_BTN_ALT, hover_color=BG_BTN_ALT_HOVER,
+            text_color=TEXT_MUTED,
+            height=28, corner_radius=8, width=55,
+            command=lambda: self._set_sort_order("oldest"),
         )
-        self._threshold_label.pack(side="right", padx=(0, 4), pady=4)
+        self._sort_oldest_btn.pack(side="right", padx=(0, 4), pady=4)
 
-        self._threshold_slider = ctk.CTkSlider(
-            controls_frame, from_=0.15, to=0.40,
-            number_of_steps=25, width=100, height=16,
-            button_color=ACCENT_COLOR, button_hover_color=ACCENT_HOVER,
-            progress_color=BG_BTN, fg_color=BG_SEARCH,
-            command=self._on_threshold_change,
+        self._sort_newest_btn = ctk.CTkButton(
+            controls_frame, text="Newest",
+            font=ctk.CTkFont(size=11),
+            fg_color=BG_BTN_ALT, hover_color=BG_BTN_ALT_HOVER,
+            text_color=TEXT_MUTED,
+            height=28, corner_radius=8, width=60,
+            command=lambda: self._set_sort_order("newest"),
         )
-        self._threshold_slider.set(0.20)
-        self._threshold_slider.pack(side="right", padx=2, pady=4)
+        self._sort_newest_btn.pack(side="right", padx=(0, 4), pady=4)
 
         ctk.CTkLabel(
-            controls_frame, text="Threshold:",
+            controls_frame, text="Sort:",
             font=ctk.CTkFont(size=11), text_color=TEXT_MUTED,
-        ).pack(side="right", padx=(8, 0), pady=4)
+        ).pack(side="right", padx=(8, 4), pady=4)
 
         # Canvas with scrollbar for virtual scrolling
         canvas_frame = ctk.CTkFrame(self, fg_color=BG_DARK)
@@ -1068,7 +1095,7 @@ class GalleryView(ctk.CTkFrame):
             self._active_preset = None
             self.search_entry.delete(0, "end")
             self._update_preset_styles()
-            self.display_paths = list(self.all_image_paths)
+            self.display_paths = self._maybe_sort(list(self.all_image_paths))
             self._update_status(f"{len(self.all_image_paths)} photos")
             self._refresh_grid()
         else:
@@ -1085,6 +1112,54 @@ class GalleryView(ctk.CTkFrame):
                 btn.configure(fg_color=ACCENT_COLOR, hover_color=ACCENT_HOVER)
             else:
                 btn.configure(fg_color=BG_BTN, hover_color=BG_BTN_HOVER)
+
+    def _set_sort_order(self, order: str):
+        """Set sort order to 'newest', 'oldest', or toggle off if already active."""
+        if self._sort_order == order:
+            self._sort_order = None
+        else:
+            self._sort_order = order
+        self._update_sort_styles()
+        self._apply_sort_and_refresh()
+
+    def _update_sort_styles(self):
+        for btn, key in [(self._sort_newest_btn, "newest"), (self._sort_oldest_btn, "oldest")]:
+            if self._sort_order == key:
+                btn.configure(fg_color=ACCENT_COLOR, hover_color=ACCENT_HOVER, text_color=TEXT_PRIMARY)
+            else:
+                btn.configure(fg_color=BG_BTN_ALT, hover_color=BG_BTN_ALT_HOVER, text_color=TEXT_MUTED)
+
+    def _sort_paths_by_date(self, paths: list, newest_first: bool = True) -> list:
+        """Sort paths by date_created from photo_metadata. Paths without dates go to the end."""
+        if not self._file_manifest:
+            return paths
+
+        sentinel = datetime.min if newest_first else datetime.max
+
+        def _date_key(path):
+            file_id = Path(path).stem
+            meta = self._file_manifest.get(file_id, {})
+            date_str = meta.get("photo_metadata", {}).get("date_created")
+            if date_str:
+                try:
+                    dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                    return dt.replace(tzinfo=None)
+                except (ValueError, TypeError):
+                    pass
+            return sentinel
+
+        return sorted(paths, key=_date_key, reverse=newest_first)
+
+    def _maybe_sort(self, paths: list) -> list:
+        """Apply current sort order to paths if one is active."""
+        if self._sort_order:
+            return self._sort_paths_by_date(paths, newest_first=(self._sort_order == "newest"))
+        return paths
+
+    def _apply_sort_and_refresh(self):
+        """Re-sort current display_paths and refresh the grid."""
+        self.display_paths = self._maybe_sort(self.display_paths)
+        self._refresh_grid()
 
     def _on_threshold_change(self, value: float):
         self._threshold_value = round(value, 2)
@@ -1120,7 +1195,7 @@ class GalleryView(ctk.CTkFrame):
         else:
             # Filter all images by date
             filtered = self._filter_paths_by_date(list(self.all_image_paths))
-            self.display_paths = filtered
+            self.display_paths = self._maybe_sort(filtered)
             self._update_status(f"{len(filtered)} photos (date filtered)")
             self._refresh_grid()
 
@@ -1132,7 +1207,7 @@ class GalleryView(ctk.CTkFrame):
         if query:
             self._perform_search()
         else:
-            self.display_paths = list(self.all_image_paths)
+            self.display_paths = self._maybe_sort(list(self.all_image_paths))
             self._update_status(f"{len(self.all_image_paths)} photos")
             self._refresh_grid()
 
@@ -1202,7 +1277,7 @@ class GalleryView(ctk.CTkFrame):
         query = self.search_entry.get().strip()
 
         if not query:
-            self.display_paths = list(self.all_image_paths)
+            self.display_paths = self._maybe_sort(list(self.all_image_paths))
             self._update_status(f"{len(self.all_image_paths)} photos")
             self._refresh_grid()
             return
@@ -1227,7 +1302,7 @@ class GalleryView(ctk.CTkFrame):
         threading.Thread(target=do_search, daemon=True).start()
 
     def _show_search_results(self, query: str, paths: List[str]):
-        filtered = self._filter_paths_by_date(paths)
+        filtered = self._maybe_sort(self._filter_paths_by_date(paths))
         self.display_paths = filtered
         if len(filtered) != len(paths):
             self._update_status(f"{len(filtered)} results for \"{query}\" (date filtered from {len(paths)})")
