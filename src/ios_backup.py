@@ -682,7 +682,6 @@ class iOSBackupParser:
             ("iMessage Attachments", self._extract_imessage_images),
             ("WhatsApp Images", self._extract_whatsapp_images),
             ("Notes Attachments", self._extract_notes_images),
-            ("Browser Cache", self._extract_browser_cache),
         ]
 
         for source_name, extractor in sources:
@@ -968,74 +967,6 @@ class iOSBackupParser:
             logger.warning(f"Notes extraction error: {e}")
         finally:
             conn.close()
-        return manifest
-
-    def _extract_browser_cache(self, output_dir: Path) -> Dict[str, dict]:
-        """Extract cached images from Safari/Chrome/Firefox (all use WebKit on iOS)."""
-        browser_dbs = [
-            ("Safari", "HomeDomain", "Library/Caches/com.apple.mobilesafari/Cache.db"),
-            ("Chrome", "AppDomain-com.google.chrome.ios", "Library/Caches/com.google.chrome.ios/Cache.db"),
-            ("Firefox", "AppDomain-org.mozilla.ios.Firefox", "Library/Caches/org.mozilla.ios.Firefox/Cache.db"),
-        ]
-
-        manifest = {}
-        for browser_name, domain, db_path in browser_dbs:
-            conn = self._open_backup_db(domain, db_path)
-            if not conn:
-                continue
-
-            try:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT cr.entry_ID, cr.receiver_data, cr.isDataOnFS, ce.request_key
-                    FROM cfurl_cache_receiver_data cr
-                    JOIN cfurl_cache_response ce ON cr.entry_ID = ce.entry_ID
-                """)
-                count = 0
-                for row in cursor.fetchall():
-                    url = row['request_key'] or ""
-                    is_on_fs = row['isDataOnFS']
-                    entry_id = row['entry_ID']
-                    blob = row['receiver_data']
-
-                    # Check if URL suggests an image
-                    url_lower = url.lower()
-                    is_image_url = any(ext in url_lower for ext in
-                                       ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic'))
-
-                    if not is_on_fs and blob:
-                        # Check magic bytes of blob
-                        magic = blob[:8]
-                        ext = magic_to_extension(magic)
-                        if not ext and not is_image_url:
-                            continue
-                        if not ext:
-                            ext = ".jpg"
-                    elif is_image_url:
-                        ext = ".jpg"
-                    else:
-                        continue
-
-                    filename = f"{browser_name.lower()}_cache_{entry_id}{ext}"
-                    dst = output_dir / filename
-                    if dst.exists():
-                        continue
-
-                    if not is_on_fs and blob and len(blob) > 100:
-                        dst.write_bytes(blob)
-                        count += 1
-                    # On-filesystem cached items would need separate file lookup
-                    # which varies by iOS version; skip for now
-
-                    manifest[f"{browser_name.lower()}_cache_{entry_id}"] = {
-                        "relative_path": url[:200],
-                        "domain": domain,
-                        "source": f"{browser_name.lower()}_cache",
-                    }
-            except Exception as e:
-                logger.debug(f"{browser_name} cache extraction: {e}")
-            finally:
-                conn.close()
         return manifest
 
     def cleanup(self):

@@ -6,6 +6,7 @@ and EXIF data for images in an iOS backup.
 """
 
 import logging
+import re
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -26,6 +27,14 @@ logger = logging.getLogger(__name__)
 _CORE_DATA_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
 _MIN_SANE_DATE = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MAX_SANE_DATE = datetime(2100, 1, 1, tzinfo=timezone.utc)
+
+_UUID_RE = re.compile(r'[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}')
+
+
+def _extract_uuid_from_path(rel_path: str) -> Optional[str]:
+    """Extract the first UUID from a relative path, uppercased."""
+    match = _UUID_RE.search(rel_path)
+    return match.group(0).upper() if match else None
 
 
 def _convert_core_data_timestamp(ts) -> Optional[str]:
@@ -246,7 +255,7 @@ def _query_photos_sqlite(conn: sqlite3.Connection) -> list:
         pass
 
     # Base ZASSET columns (always expected)
-    asset_base = ["ZFILENAME", "ZDIRECTORY", "ZLATITUDE", "ZLONGITUDE", "ZDATECREATED"]
+    asset_base = ["ZFILENAME", "ZDIRECTORY", "ZLATITUDE", "ZLONGITUDE", "ZDATECREATED", "ZUUID"]
     # Optional ZASSET columns
     asset_optional = [
         "ZKIND", "ZKINDSUBTYPE", "ZFAVORITE", "ZHIDDEN",
@@ -328,6 +337,7 @@ def extract_photo_metadata(parser, manifest: dict, output_dir,
 
     # Step 1: Try to open Photos.sqlite and build directory+filename -> metadata mapping
     db_meta = {}
+    uuid_to_db_meta = {}
     try:
         conn = parser.open_backup_db("CameraRollDomain", "Media/PhotoData/Photos.sqlite")
         if conn:
@@ -412,60 +422,78 @@ def extract_photo_metadata(parser, manifest: dict, output_dir,
 
                     db_meta[key] = meta
 
+                    zuuid = row.get("ZUUID")
+                    if zuuid:
+                        uuid_to_db_meta[zuuid.upper()] = meta
+
                 logger.info(f"Photos.sqlite: loaded metadata for {len(db_meta)} assets")
             finally:
                 conn.close()
     except Exception as e:
         logger.warning(f"Could not open Photos.sqlite: {e}")
 
-    # Step 2: Walk manifest and match
-    # Pre-build a lookup from rel_path suffix to db_meta for O(1) matching
-    _IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.heic', '.heif', '.tiff', '.tif', '.dng'}
+    # Step 2: Walk manifest and match using layered strategy
     path_to_db_meta = {}
     for db_key, meta in db_meta.items():
         path_to_db_meta[db_key] = meta
 
-    # Pre-filter to image files for accurate progress count
-    image_items = [
-        (fid, info) for fid, info in manifest.items()
-        if Path(info.get("relative_path", "")).suffix.lower() in _IMAGE_EXTENSIONS
-    ]
+    image_items = list(manifest.items())
     total = len(image_items)
+    path_count = 0
+    uuid_count = 0
+    exif_count = 0
 
     for idx, (file_id, info) in enumerate(image_items, 1):
         if progress_callback:
             progress_callback(idx, total)
         rel_path = info.get("relative_path", "")
+        is_deep = info.get("source") is not None
 
-        # Try to match Camera Roll images via ZDIRECTORY/ZFILENAME suffix
-        matched = False
+        # Layer 1: Path suffix match (original Camera Roll files)
+        matched_meta = None
         if path_to_db_meta and rel_path:
-            # Extract the directory/filename portion to match against db keys
             parts = rel_path.split("/")
-            # db_key format is "DCIM/subdir/filename" — try last 2 and 3 segments
             for n in (2, 3):
                 if len(parts) >= n:
                     suffix_key = "/".join(parts[-n:])
                     if suffix_key in path_to_db_meta:
-                        result[file_id] = path_to_db_meta[suffix_key]
-                        matched = True
+                        matched_meta = path_to_db_meta[suffix_key]
+                        path_count += 1
                         break
 
-        # For non-Camera Roll or unmatched images, try EXIF from extracted file
-        if not matched:
+        # Layer 2: UUID match (derivatives, thumbnails, CPLAssets)
+        if matched_meta is None and uuid_to_db_meta and rel_path and not is_deep:
+            path_uuid = _extract_uuid_from_path(rel_path)
+            if path_uuid and path_uuid in uuid_to_db_meta:
+                matched_meta = uuid_to_db_meta[path_uuid]
+                uuid_count += 1
+
+        # Layer 3: EXIF fallback (no extension gate — let Pillow decide)
+        exif_meta = None
+        if matched_meta is None:
             try:
                 candidates = list(output_dir.glob(f"{file_id}.*"))
                 candidates.extend(output_dir.glob(f"_deep/{file_id}.*"))
                 for candidate in candidates:
-                    if candidate.is_file() and candidate.suffix.lower() in _IMAGE_EXTENSIONS:
-                        meta = _extract_exif(str(candidate))
-                        if meta.get("date_created") or meta.get("latitude") or meta.get("camera_model"):
-                            result[file_id] = meta
+                    if candidate.is_file():
+                        exif_meta = _extract_exif(str(candidate))
                         break
             except Exception as e:
                 logger.debug(f"EXIF fallback failed for {file_id}: {e}")
 
+        # Layer 4: Assign result — keep any data we found
+        if matched_meta is not None:
+            result[file_id] = dict(matched_meta)
+        elif exif_meta is not None:
+            has_any_data = any(
+                v is not None for k, v in exif_meta.items()
+                if k != "source_db"
+            )
+            if has_any_data:
+                result[file_id] = exif_meta
+                exif_count += 1
+
     logger.info(f"Photo metadata extracted: {len(result)} entries "
-                f"({sum(1 for m in result.values() if m.get('source_db') == 'photos.sqlite')} from DB, "
-                f"{sum(1 for m in result.values() if m.get('source_db') == 'exif')} from EXIF)")
+                f"({path_count} path-matched, {uuid_count} UUID-matched, "
+                f"{exif_count} EXIF-only)")
     return result
