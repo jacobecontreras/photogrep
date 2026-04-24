@@ -1,3 +1,9 @@
+<p align="center">
+<a href="https://github.com/jacobecontreras/readOnlySqlViewer/blob/main/LICENSE"><img
+    src="https://img.shields.io/github/license/jacobecontreras/readOnlySqlViewer?style=flat-square"
+    alt="MIT License" /></a>
+</p>
+
 ![photoGrep banner](assets/readme-banner.webp)
 
 Privately extract images from encrypted iOS backups and search them with natural language using CLIP.
