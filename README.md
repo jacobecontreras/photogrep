@@ -1,6 +1,7 @@
-# photoGrep
+![photoGrep banner](assets/readme-banner.webp)
 
 Privately extract images from encrypted iOS backups and search them with natural language using CLIP.
+
 
 ## Prerequisites
 
@@ -55,6 +56,8 @@ python -m src gui
 ## GUI
 
 The GUI is a extraction manager/photo gallery for browsing and searching extracted images.
+
+![photoGrep gallery](assets/photoGrep.webp)
 
 ### Search
 
